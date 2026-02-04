@@ -12,9 +12,9 @@ header-includes:
   - \newcommand{\elandscape}{\end{landscape}} 
 fontsize: 12pt
 params:
-  dir.code: 'script/main-code/'
-  fig.code: 'output/figures/'
-  save.filename: 'output/MCMC/EIV-nominal-branin-gaussian-linear-map-50-200.rds'
+  main.dir: 'script/main-code/'
+  fig.dir: 'penghui-local/output/figures/'
+  save.filename: 'penghui-local/output/MCMC/EIV-nominal-branin-gaussian-linear-map-50-100.rds'
 ---
 
 ```{r setup, include=FALSE}
@@ -25,7 +25,7 @@ knitr::opts_chunk$set(collapse = TRUE, message = FALSE, tidy = TRUE, tidy.opts =
 
 # Load libraries and generate data
 
-This .rmd file runs a simulation for mixed Gaussian process regression. To begin with, we load some useful packages and functions.
+This .rmd file runs a simulation for EIV-GP regression with a nominal input. To begin with, load some packages and functions.
 
 ```{r}
 library(mvtnorm)
@@ -41,9 +41,9 @@ library(ggplot2)
 library(gridExtra)
 library(metR)
 ##
-source(paste0(params$dir.code, 'basics-common.R'))
-source(paste0(params$dir.code, 'basics-nominal.R'))
-source(paste0(params$dir.code, 'plot-config.R'))
+source(paste0(params$main.dir, 'basics-common.R'))
+source(paste0(params$main.dir, 'basics-nominal.R'))
+source(paste0(params$main.dir, 'plot-config.R'))
 ```
 
 Set basic parameters for simulation.
@@ -70,10 +70,10 @@ x.lb <- -2
 # generate X, c, and U ----
 set.seed(4)
 
-# Gaussian
+# U is sampled by Gaussian distribution
 X <- (x.ub - x.lb)*maximinLHS(n, d.x) + x.lb 
 U <- cbind(1, X)%*%B.tilde.true + matrix(rnorm(n*d), n, d)%*%chol(Sigma.u.true)
-# uniform
+# U is sampled by Uniform distribution
 #XU <- maximinLHS(n, d.x+d)
 #X <- matrix(XU[, 1]*(x.ub - x.lb) + x.lb, n, 1)
 #U <- 4*XU[, 2:3]-2
@@ -85,6 +85,7 @@ c <- response$c
 y <- f.true + sqrt(sigma.error2.true)*rnorm(n) 
 sd.y <- sd(y)
 y <- y/sd.y 
+
 # Observed U ----
 n.obs <- floor(50)  # total number
 n.obs.c <- rep(0, m)  # number for each class
@@ -119,9 +120,8 @@ z_df['f'] <- f.grid$f
 z_df['class'] <- as.character(f.grid$c)
 ```
 
-Visualization
-```{r fig.cap = 'Heatmap and contours', echo=FALSE} 
-#pdf(paste0(params$fig.code, 'branin-3d.pdf'), width = 8, height = 6)
+```{r fig.cap = 'Heatmap and contours of the regression function', echo=FALSE} 
+#pdf(paste0(params$fig.dir, 'branin-3d.pdf'), width = 8, height = 6)
 persp3D(u1, u2, matrix(z_df$f, ncol = nn), xlab = 'u_1', ylab = 'u_2', zlab = 'f')
 #dev.off()
 
@@ -135,7 +135,7 @@ ggfig <- ggplot(z_df, aes(x = u1, y = u2, z = f)) +
   scale_y_continuous(name = expression(u[2])) +
   labs(fill = expression(f(u[1], u[2]))) +
   my_theme
-ggsave(paste0(params$fig.code, 'branin-heatmap.pdf'), plot = ggfig, width = 8, height = 6)
+ggsave(paste0(params$fig.dir, 'branin-heatmap.pdf'), plot = ggfig, width = 8, height = 6)
 
 ggfig <- ggplot(z_df, aes(x = u1, y = u2, z = f)) +
   geom_tile(aes(fill = f)) +        
@@ -150,7 +150,7 @@ ggfig <- ggplot(z_df, aes(x = u1, y = u2, z = f)) +
   coord_cartesian(xlim = c(min(U[,1]), max(U[,1])), ylim = c(min(U[,2]), max(U[,2]))) +
   labs(fill = expression(f(u[1], u[2]))) +
   my_theme
-ggsave(paste0(params$fig.code, 'branin-region.png'), plot = ggfig, width = 8, height = 6)
+ggsave(paste0(params$fig.dir, 'branin-region.png'), plot = ggfig, width = 8, height = 6)
 
 ggfig <- ggplot(z_df, aes(x = u1, y = u2, color = class)) + 
     geom_point(size = 3.5, alpha = 0.8) +
@@ -159,7 +159,7 @@ ggfig <- ggplot(z_df, aes(x = u1, y = u2, color = class)) +
     scale_y_continuous(name = expression(u[2])) +
     #labs(title = "True classification boundary") +
     my_theme
-ggsave(paste0(params$fig.code, 'branin-region-2.png'), plot = ggfig, width = 8, height = 6)
+ggsave(paste0(params$fig.dir, 'branin-region-2.png'), plot = ggfig, width = 8, height = 6)
 ```
 
 ```{r}
@@ -177,7 +177,7 @@ for (j in 1:d) {
   scale_y_continuous(name = bquote(u[.(j)])) +
   my_theme
   
-  ggsave(paste0(params$fig.code, sprintf('Scatter-u-%d-vs-x.pdf', j)), plot = ggfig, width = 8, height = 6)
+  ggsave(paste0(params$fig.dir, sprintf('Scatter-u-%d-vs-x.pdf', j)), plot = ggfig, width = 8, height = 6)
 }
 ```
 
@@ -191,7 +191,7 @@ ggfig <- ggplot(u_df, aes(x = u1, y = u2, color = class, shape = observed)) +
   scale_x_continuous(name = expression(u[1])) +  
   scale_y_continuous(name = expression(u[2])) +
   my_theme
-ggsave(paste0(params$fig.code, 'Scatter-u.pdf'), plot = ggfig, width = 8, height = 6)
+ggsave(paste0(params$fig.dir, 'Scatter-u.pdf'), plot = ggfig, width = 8, height = 6)
 
 ggfig <- ggplot(u_df[u_df$observed=="TRUE",], aes(x = u1, y = u2, color = class, shape = observed)) +
   geom_point(size = 3) +
@@ -202,7 +202,7 @@ ggfig <- ggplot(u_df[u_df$observed=="TRUE",], aes(x = u1, y = u2, color = class,
   scale_x_continuous(name = expression(u[1])) +  
   scale_y_continuous(name = expression(u[2])) +
   my_theme
-ggsave(paste0(params$fig.code, 'Scatter-u-observed.pdf'), plot = ggfig, width = 8, height = 6)
+ggsave(paste0(params$fig.dir, 'Scatter-u-observed.pdf'), plot = ggfig, width = 8, height = 6)
 
 #plot_list[[3]] <- ggplot(u_df[u_df$observed=="FALSE",], aes(x = u1, y = u2, color = class, shape = observed)) +
 #  geom_point(size = 3) +
@@ -220,14 +220,14 @@ c_df <- data.frame(class = 1:m, value = rep(0,m))
 for (i in 1:m) {
   c_df$value[i] <- sum(c == i)
 }
-#bar_plot <- 
+bar_plot <- 
   ggplot(c_df, aes(x = class, y = value, fill = as.character(class))) +
   geom_bar(stat = "identity", color = "black", width = 0.7) +
   scale_fill_viridis_d(name = "Class") +  
   labs(x = "Class", y = "Count") +
   my_theme +
   theme(legend.position = "right")
-#ggsave(paste0(params$fig.code, 'class-bar-plot.pdf'), plot = bar_plot, width = 8, height = 6)
+#ggsave(paste0(params$fig.dir, 'class-bar-plot.pdf'), plot = bar_plot, width = 8, height = 6)
 ```
 
 ```{r}
@@ -244,31 +244,22 @@ ggplot(u_df, aes(x = X, y = y, color = class)) +
   my_theme
 ```
 
-# Obtain GP hyperparameters (by MLE)
+# Set model hyperparameters
 
-For comparison, we obtain the MLE of GP hyperparameters using the true $\mathbf{u}$. We use package 'laGP' (see Gramacy's book).
-
-```{r, eval = FALSE}
-W <- cbind(X, U)
-gp <- newGPsep(W, y, d = 0.1, g = 0.01, dK = TRUE)
-gp.mle <- mleGPsep(gp, param = "both", tmin = c(1e-3, 1e-3), tmax=c(1e3, var(y)))
-theta.mle <- 1/gp.mle$theta[1:(d.x+d)]
-g.mle <- gp.mle$theta[length(gp.mle$theta)] 
-sigma2.mle <- (t(y)%*%solve(KernelMatrix(W, c(theta.mle, 1)) + g.mle*diag(n))%*%(y)/n) |> drop()
-sigma.error2.mle <- sigma2.mle*g.mle
-rho.mle <- sqrt(1/g.mle)
-rm(list=c('W','gp','gp.mle','g.mle','sigma2.mle'))
+```{r}
+v0 <- 0  # flat prior on intercept of U
+g <- 0.1
+nu0 <- d  # improper
+Psi0 <- diag(d)
+q0 <- 1
+q.gamma <- 1
+IG.a.error <- 2.5/2
+IG.b.error <- 2.5*0.084/2
 ```
 
-```{r echo = FALSE, eval = FALSE}
-print(paste0('The MLE of lengthscale for x is ', theta.mle[1:d.x]))
-print(paste0('The MLE of lengthscale for u is '))
-print(theta.mle[(d.x+1):(d.x+d)])
-print(paste0('The MLE of nugget (variance) is ', sigma.error2.mle))
-print(paste0('The MLE of SN ratio is ', rho.mle))
-```
+# Obtain GP hyperparameters by MLE
 
-Consider using the limited observed data for MLE.
+Fit MLE for GP hyperparameters using the observed $\mathbf{u}$. We use package 'laGP' (see Gramacy's book).
 
 ```{r}
 W <- cbind(X, U)
@@ -294,11 +285,35 @@ print(paste0('The MLE (from observed U) of SN ratio is ', rho.mle.obs))
 deleteGPsep(gp)
 ```
 
-# Obtain GP hyperparameters (by Empirical Bayes)
+For comparison, we obtain the MLE of GP hyperparameters using the true $\mathbf{u}$. 
+
+```{r, eval = FALSE}
+W <- cbind(X, U)
+gp <- newGPsep(W, y, d = 0.1, g = 0.01, dK = TRUE)
+gp.mle <- mleGPsep(gp, param = "both", tmin = c(1e-3, 1e-3), tmax=c(1e3, var(y)))
+theta.mle <- 1/gp.mle$theta[1:(d.x+d)]
+g.mle <- gp.mle$theta[length(gp.mle$theta)] 
+sigma2.mle <- (t(y)%*%solve(KernelMatrix(W, c(theta.mle, 1)) + g.mle*diag(n))%*%(y)/n) |> drop()
+sigma.error2.mle <- sigma2.mle*g.mle
+rho.mle <- sqrt(1/g.mle)
+rm(list=c('W','gp','gp.mle','g.mle','sigma2.mle'))
+```
+
+```{r echo = FALSE, eval = FALSE}
+print(paste0('The MLE of lengthscale for x is ', theta.mle[1:d.x]))
+print(paste0('The MLE of lengthscale for u is '))
+print(theta.mle[(d.x+1):(d.x+d)])
+print(paste0('The MLE of nugget (variance) is ', sigma.error2.mle))
+print(paste0('The MLE of SN ratio is ', rho.mle))
+```
+
+# (Optional) Obtain GP hyperparameters by Empirical Bayes
+
+Warning: must slower than MLE.
 
 Create candidates for Theta.
 
-```{r}
+```{r, eval = FALSE}
 hyper.mat <- c() # each column of hyper.mat is a candidate of hyperparameter (theta,rho)
 for (i in exp(log(2)*c(-6:1))) { # length scale for x
   for (j in exp(log(2)*c(-6:1))) { # lengthscale for u
@@ -310,22 +325,9 @@ for (i in exp(log(2)*c(-6:1))) { # length scale for x
 rm(list=c('i','j','l'))
 ```
 
-Set model hyperparameters.
-
-```{r}
-v0 <- 0 # flat prior on intercept of U
-g <- 0.1
-nu0 <- d # improper
-Psi0 <- diag(d)
-q0 <- 1
-q.gamma <- 1
-IG.a.error <- 2.5/2
-IG.b.error <- 2.5*0.084/2
-```
-
 Generate Monte Carlo samples of $\mathbf{U}$ given $\{\mathbf{X},\mathbf{c},\mathbf{u}^\text{obs}\}$.
 
-```{r}
+```{r, eval = FALSE}
 n.mc.eb <- 10000
 set.seed(999)
 Sigma.u0 <- rinvwishart(nu0, Psi0)
@@ -341,7 +343,7 @@ samples.eb <- Gibbs.EB(345, n.mc.eb,
 
 Estimate the marginal likelihood.
 
-```{r}
+```{r, eval = FALSE}
 cl <- parallel::makeCluster(8)
 doParallel::registerDoParallel(cl)
 eb.evidence <- foreach(i = 1:ncol(hyper.mat), .combine = 'cbind') %dopar% {
@@ -356,7 +358,7 @@ rm(cl)
 
 Select the optimal one.
 
-```{r}
+```{r, eval = FALSE}
 burnin <- 2000
 skip <- 5
 eb.evidence.mean <- apply(eb.evidence[seq(burnin, nrow(eb.evidence), by = skip), ], 2, mean)
@@ -365,11 +367,9 @@ theta.eb <- hyper.mat[1:(d.x+d), which.max(eb.evidence.mean)]
 rho.eb <- hyper.mat[d.x+d+1, which.max(eb.evidence.mean)]
 ```
 
-The selected lengthscale for $\mathbf{x}$ is `r eb.hyper.opm[1:nc]`,  the lengthscale for $\mathbf{U}$ is `r eb.hyper.opm[(nc+1):(nc+d)]`, and the GP signal-to-noise ratio is `r eb.hyper.opm[nc+d+1]`.
+Plot the Monte Carlo estimates of the marginal likelihood for each candidate. 
 
-We plot the Monte Carlo estimates of the marginal likelihood for each candidate. 
-
-```{r echo = FALSE}
+```{r echo = FALSE, eval = FALSE}
 plot(log(eb.evidence.mean), 
      ylab = 'Log Evidence', 
      xlab = 'Hyper-parameter index')
@@ -456,6 +456,8 @@ saveRDS(list(X = X, y = y, sd.y = sd.y, c = c, x.ub = x.ub, x.lb = x.lb,
              accep.hist = accep.hist, stepsize.hist = stepsize.hist, time.hist = time.hist), 
         file = params$save.filename) 
 ```
+
+Shutdown the system 
 
 ```{r echo = FALSE}
 # system('shutdown -s')

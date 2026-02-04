@@ -12,9 +12,9 @@ header-includes:
   - \newcommand{\elandscape}{\end{landscape}}
 fontsize: 12pt
 params:
-  dir.code: 'script/main-code/'
-  fig.code: 'output/figures/'
-  results.file: 'output/MCMC/EIV-ordinal-cos-10.rds'
+  main.dir: 'script/main-code/'
+  fig.dir: 'penghui-local/output/figures/'
+  results.file: 'penghui-local/output/MCMC/EIV-ordinal-cos-10.rds'
 ---
 
 ```{r setup, include=FALSE}
@@ -36,13 +36,13 @@ library(patchwork)
 library(laGP)
 library(mvtnorm)
 library(LaplacesDemon)
-source(paste0(params$dir.code, 'basics-common.R'))
-source(paste0(params$dir.code, 'basics-ordinal.R'))
-source(paste0(params$dir.code, 'plot-config.R'))
+source(paste0(params$main.dir, 'basics-common.R'))
+source(paste0(params$main.dir, 'basics-ordinal.R'))
+source(paste0(params$main.dir, 'plot-config.R'))
 ```
 
 ```{r}
-code <- 'cos'
+code <- 'cos'  # code for the regression function
 ```
 
 Extract simulation results. 
@@ -205,7 +205,7 @@ arrows(U.hist[idx[1], iter.idx[-length(iter.idx)]], U.hist[idx[2], iter.idx[-len
        length = 0.1, col = 'blue', lwd = 2)
 ```
 
-# Imputation of U
+# Imputation of u
 
 ```{r}
 burnin <- 20000
@@ -229,7 +229,7 @@ ggplot(u_df, aes(x = U.true, y = U.pos.mean, color = class)) +
        y = c(min(U.true, u_df$U.pos.mean), max(U.true, u_df$U.pos.mean))) + 
   geom_abline(slope = 1, intercept = 0, linewidth = 1, color = 'brown') +
   my_theme
-ggsave(paste0(params$fig.code, 'Imputed-u-vs-true-u.pdf'), plot = ggfig, width = 8, height = 6)
+ggsave(paste0(params$fig.dir, 'Imputed-u-vs-true-u.pdf'), plot = ggfig, width = 8, height = 6)
 
 ggfig <-
 ggplot(u_df, aes(y = f.true, col = Coverage)) +
@@ -242,7 +242,7 @@ ggplot(u_df, aes(y = f.true, col = Coverage)) +
   labs(x = 'U', y = 'True f') +
   geom_segment(aes(x = U.pos.lq, y = f.true, xend = U.pos.uq, yend = f.true)) + 
   my_theme
-ggsave(paste0(params$fig.code, 'Imputed-u-quantile.pdf'), plot = ggfig, width = 8, height = 6)
+ggsave(paste0(params$fig.dir, 'Imputed-u-quantile.pdf'), plot = ggfig, width = 8, height = 6)
 ```
 
 # Inference of f
@@ -254,7 +254,7 @@ U.grid <- seq(u.lb, u.ub, length = 100)
 W.grid <- cbind(X.grid, U.grid)
 ```
 
-Fit a GP using the limited complete data.
+Fit a GP using the fully observed data (i.e., with $u_\text{obs}$.
 
 ```{r}
 W <- cbind(X, U.true)
@@ -264,7 +264,7 @@ f.pred.gp <- predGPsep(gp, W.grid, lite = TRUE, nonug = TRUE)
 ```
 
 ```{r}
-# call the destructor function otherwise memory will leak.
+# call the destructor function. Otherwise, memory will leak.
 deleteGPsep(gp)
 ```
 
@@ -282,7 +282,7 @@ f_df$width <- f_df$f.uq - f_df$f.lq
 f_df$cover <- (f_df$f.lq <= f_df$f.true) & (f_df$f.true <= f_df$f.uq)
 ```
 
-Predict f on a grid using EIV-logistic model fitted from the whole data.
+Predict f on a grid using the EIV-GP model fitted from the whole data.
 
 ```{r}
 burnin <- 20000
@@ -320,7 +320,7 @@ ggplot(f_df, aes(x = u)) +
   labs(x = 'u', y = 'f') +
   lims(y = c(min(f_df$f.lq, f_eiv_df$f.lq, f_df$f.true), max(f_df$f.uq, f_eiv_df$f.uq, f_df$f.true))) + 
   my_theme
-ggsave(paste0(params$fig.code, 'prediction-f-GP.pdf'), plot = ggfig, width = 8, height = 6)
+ggsave(paste0(params$fig.dir, 'prediction-f-GP.pdf'), plot = ggfig, width = 8, height = 6)
 
 ggfig <-
 ggplot(f_eiv_df, aes(x = u)) + 
@@ -331,11 +331,11 @@ ggplot(f_eiv_df, aes(x = u)) +
   labs(x = 'u', y = 'f') +
   lims(y = c(min(f_df$f.lq, f_eiv_df$f.lq, f_df$f.true), max(f_df$f.uq, f_eiv_df$f.uq, f_df$f.true))) + 
   my_theme
-ggsave(paste0(params$fig.code, 'prediction-f-EIV.pdf'), plot = ggfig, width = 8, height = 6)
+ggsave(paste0(params$fig.dir, 'prediction-f-EIV.pdf'), plot = ggfig, width = 8, height = 6)
 
 ```
 
-# Mixed-input regression
+# Mixed-input prediction
 Create a test data set.
 
 ```{r}
@@ -350,7 +350,7 @@ X.star <- matrix(rep(x.lb + (1:num.x)*(x.ub-x.lb)/(num.x+1), m), ncol = 1)
 #c.star <- apply(U.star, 1, function(u) match(T, c(u-Tau.true,-Inf) <= 0))  # generate c.star
 ```
 
-Oracle prediction (assuming the DGP is true and using true parameters).
+Oracle prediction (according to the data-generating process).
 
 ```{r}
 n.mc <- 2000
@@ -360,7 +360,7 @@ f.star.oracle <- predict.oracle$f.predict.hist
 y.star.oracle <- predict.oracle$y.predict.hist
 ```
 
-EIV prediction.
+EIV-GP prediction
 
 ```{r}
 ## set indices for thinning
@@ -375,10 +375,10 @@ f.star.pred <- predict.result$f.predict.hist
 y.star.pred <- predict.result$y.predict.hist
 ```
 
-Mixed-input GP prediction (using the full data without u)
+Mixed-input GP prediction (the embedding approach, not using $u$)
 
 ```{r}
-# create embeddings
+# create embedding for discrete categories
 emb.unif <- c/(m+1)
 gp.unif <- newGPsep(cbind(X, emb.unif), y, d = 0.1, g = 0.01, dK = TRUE)
 gp.unif.mle <- mleGPsep(gp.unif, param = "both", tmin = c(1e-3, 1e-3), tmax=c(1e3, 10^2))
@@ -445,11 +445,11 @@ for (idx in 1:length(c.star)) {
     my_theme 
 
   grid.arrange(grobs = plot_list, nrow = 1)
-  #ggsave(paste0(params$fig.code, 'prediction-', idx, '.pdf'), plot = grid.arrange(grid.arrange(grobs = plot_list, nrow = 1)), width = 8*3, height = 6)
+  #ggsave(paste0(params$fig.dir, 'prediction-', idx, '.pdf'), plot = grid.arrange(grid.arrange(grobs = plot_list, nrow = 1)), width = 8*3, height = 6)
 }
 ```
 
-Prediction metrics.
+Prediction metrics (energy distance between the predicted and oracle $y^*$)
 
 ```{r}
 metric <- data.frame(X.star = X.star, c.star = c.star, EIV = rep(0, length(c.star)), GP.unif = rep(0, length(c.star)), GP.gaussian = rep(0, length(c.star)))
@@ -477,5 +477,5 @@ ggplot(metric_df, aes(x = c.star, y = distance, fill = method)) +
   labs(x = "c*", y = "Energy distance to the truth", fill = 'Method') +
   my_fill_scale +
   my_theme
-#ggsave(paste0(params$fig.code, 'prediction-bar-plot.pdf'), plot = ggfig, width = 8, height = 6)
+#ggsave(paste0(params$fig.dir, 'prediction-bar-plot.pdf'), plot = ggfig, width = 8, height = 6)
 ```
