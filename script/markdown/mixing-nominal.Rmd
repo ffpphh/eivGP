@@ -458,13 +458,13 @@ Visualization
 ggfig <- ggplot(f.u.imputed_df, aes(x = f.u.imputed.mean, y = f.true, color = class)) +
   geom_point(size = 3.5) +
   scale_color_viridis_d(name = "Class") + 
-  labs(title = "f of imputed U vs. f of true U", x = 'f of imputed U', y = 'f of true U') +
+  labs(x = 'Branin(imputed u)', y = 'Branin(true u)') +
   lims(x = quantile(c(f.u.imputed_df$f.u.imputed.mean, f.u.imputed_df$f.true), c(0.05, 0.95)),
        y = quantile(c(f.u.imputed_df$f.u.imputed.mean, f.u.imputed_df$f.true), c(0.05, 0.95))) + 
   geom_abline(slope = 1, intercept = 0, linewidth = 1, color = 'brown') +
   my_theme
 #print(ggfig)
-#ggsave(paste0(params$fig.dir, 'f-u-vs-f-imputed-u.pdf'), plot = ggfig, width = 8, height = 6)
+ggsave(paste0(params$fig.dir, 'f-u-vs-f-imputed-u.pdf'), plot = ggfig, width = 8, height = 6)
 
 
 ggfig <- ggplot(data = confusion_matrix, aes(x = Predicted, y = Actual, fill = Proportion)) +

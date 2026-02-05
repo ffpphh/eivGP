@@ -107,25 +107,23 @@ u_df$observed[u.obs.idx] <- "TRUE"
 
 ```{r fig.cap = 'Scatterplot of y vs. u', echo=FALSE}
 ggfig <- 
-ggplot(u_df, aes(x = u, color = class, shape = observed)) + 
+ggplot(u_df, aes(x = u, color = class)) + 
   geom_point(size = 3.5, aes(y = y)) + 
   scale_color_viridis_d(name = "Class") + 
-  scale_shape_manual(values = c("TRUE" = 17, "FALSE" = 16)) +
   geom_function(fun = function(u) ResponseFunction(X=0, U=u, code=code), color = '#FF7F0E', linewidth = 1) +
   geom_vline(xintercept = Tau.true, linewidth = 1) + 
   coord_cartesian(xlim = c(min(U), max(U)), ylim = c(min(u_df$y), max(u_df$y))) +
-  labs(color = "Class", shape = 'Observation', x = 'Latent u') + 
+  labs(color = "Class", x = 'Latent u') + 
   my_theme
 #ggsave(paste0(params$fig.dir, 'Scatter-y-vs-u.pdf'), plot = ggfig, width = 8, height = 6)
 
 ggfig <- 
-ggplot(u_df[u_df$observed=="TRUE",], aes(x = u, y = y, color = class, shape = observed)) +
+ggplot(u_df[u_df$observed=="TRUE",], aes(x = u, y = y, color = class)) +
   geom_point(size = 3.5) +
   scale_color_viridis_d(name = "Class") + 
-  scale_shape_manual(values = c("TRUE" = 17, "FALSE" = 16)) +
   geom_function(fun = function(u) ResponseFunction(X=0, U=u, code=code), color = '#FF7F0E', linewidth = 1) +
   coord_cartesian(xlim = c(min(U), max(U)), ylim = c(min(u_df$y), max(u_df$y))) +
-  labs(color = "Class", shape = 'Observation') + 
+  labs(color = "Class") + 
   my_theme
 #ggsave(paste0(params$fig.dir, 'Scatter-y-vs-u-obs.pdf'), plot = ggfig, width = 8, height = 6)
 
