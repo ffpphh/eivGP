@@ -1,4 +1,4 @@
-# mixedGP
+# Errors-in-variables Gaussian processes for mixed-input tasks
 
 Code for the paper **"Errors-in-variables Gaussian processes for mixed-input regression"**.
 
