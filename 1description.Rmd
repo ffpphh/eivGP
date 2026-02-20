@@ -1,0 +1,55 @@
+# Package setup
+
+The DESCRIPTION file is created using this code.
+
+```{r package-setup, message=FALSE, results='hide'}
+usethis::create_package(
+  path = ".",
+  fields = list(
+    Package = params$package_name,
+    Version = "0.0.0.0001",
+    Title = "eivGP",
+    Description = "Errors-in-variables Gaussian processes for mixed-input tasks.",
+    `Authors@R` = person(
+      given = "Sheng",
+      family = "Jiang",
+      email = "jiangsheng@cuhk.edu.cn",
+      role = c("aut", "cre")
+      )
+  )
+)
+usethis::use_mit_license(copyright_holder = "Fu Penghui")
+```
+
+The following is what will show up when someone types `package?eivGP` in the console.
+
+```{package_doc}
+#' eivGP
+#'
+#' This package implements the `eivGP` method.
+#' 
+#' @docType package
+```
+
+This package will have some dependancies:
+
+```{r dependencies, message = FALSE}
+library(tidyverse)
+##library(ggplot2)
+##usethis::use_package("tidyverse", type = "depends") 
+## usethis::use_package("ggplot2")
+usethis::use_package("ggplot2", type = "depends")
+usethis::use_package("pgdraw", type = "depends")
+usethis::use_package("mvtnorm", type = "depends")
+usethis::use_package("LapacesDemon", type = "depends")
+usethis::use_package("GA", type = "depends")
+usethis::use_pipe(export=TRUE)
+```
+
+<!--library("pgdraw") for simulating polya-Gamma-->
+
+<!--library("mvtnorm") for simulating multivariate normal-->
+
+<!--library('LaplacesDemon') for sampling inverse Wishart and  Matrix Normal-->
+
+<!--library('GA') for visualization-->
