@@ -1,0 +1,100 @@
+# Simulation
+
+Here we mainly have 4 steps.
+-    Data Generation.
+-    Initialization.
+-    Gibbs.
+-    Prediction.
+
+As we have finished step 1 and 3 before, here only initialization and prediction.
+
+## Initialization
+```{r}
+#' Unified Initialization for Latent Variables U and Knots Tau
+#' 
+#' This function provides initial values for the Gibbs sampler in both 
+#' Nominal and Ordinal cases. It handles cases where some latent variables 
+#' U are observed (anchoring) and ensures constraints are met.
+#'
+#' @param type Character; "nominal" or "ordinal".
+#' @param n Total number of samples.
+#' @param m Number of categories.
+#' @param c Vector of observed qualitative inputs (1 to m).
+#' @param u.obs.idx Indices where U is observed.
+#' @param U.obs Observed values of U (Matrix for nominal, Vector for ordinal).
+#' @param u.lb,u.ub Lower and upper bounds for U (mainly for ordinal).
+#' @param seed Random seed for reproducibility.
+#' 
+#' @return A list containing:
+#'   \item{U0}{Initial values for latent variables U (n x d matrix).}
+#'   \item{Tau0}{Initial knots (for ordinal only, m-1 vector).}
+#'   \item{Tau.aug0}{Augmented knots (for ordinal only, m+1 vector).}
+GetInitial <- function(type = c("nominal", "ordinal"), 
+                               n, m, c, u.obs.idx, U.obs, 
+                               u.lb = -Inf, u.ub = Inf, seed = 555) {
+  set.seed(seed)
+  type <- match.arg(type)
+  
+  if (type == "nominal") {
+    # --- NOMINAL INITIALIZATION (Section 5.2.2) ---
+    # Based on category-specific means/covariances from observed U
+    d <- ncol(U.obs)
+    U <- matrix(0, n, d)
+    
+    for (j in 1:m) {
+      # Identify observations in category j that have ground truth U
+      obs_in_j_idx <- which(c[u.obs.idx] == j)
+      
+      if (length(obs_in_j_idx) > 1) {
+        # Calculate stats from existing data
+        U.obs.j <- U.obs[obs_in_j_idx, , drop = FALSE]
+        mu.j <- apply(U.obs.j, 2, mean)
+        # Centering for covariance calculation
+        U.centered <- t(t(U.obs.j) - mu.j)
+        Sigma.j <- (t(U.centered) %*% U.centered) / length(obs_in_j_idx)
+        # Sample missing U from the category distribution
+        U[c == j, ] <- mvtnorm::rmvnorm(sum(c == j), mu.j, Sigma.j)
+      } else {
+        # Fallback if no/one observation: Sample from standard normal
+        U[c == j, ] <- matrix(rnorm(sum(c == j) * d), ncol = d)
+      }
+    }
+    # Enforce observed values (anchoring)
+    U[u.obs.idx, ] <- U.obs
+    return(list(U0 = U, Tau0 = NULL, Tau.aug0 = NULL))
+    
+  } else {
+    # --- ORDINAL INITIALIZATION (Section 5.1.2) ---
+    # Based on truncated normals and interval constraints (tau)
+    # Note: Assumes d=1 for ordinal case
+    U <- rep(0, n)
+    
+    if (length(u.obs.idx) > 0) {
+      # Initialize Knots (Tau) based on observed U boundaries
+      Tau.aug <- c(u.lb, rep(0, m - 1), u.ub)
+      for (j in 1:(m - 1)) {
+        # Knot j must be between max(U in class j) and min(U in class > j)
+        lower_limit <- max(c(Tau.aug[j], U.obs[c[u.obs.idx] <= j]))
+        upper_limit <- min(c(u.ub, U.obs[c[u.obs.idx] > j]))
+        
+        Tau.aug[j + 1] <- DrawTrunNormal(0, 1, lower_limit, upper_limit)
+      }
+      # Sample missing U within their respective category intervals [tau_j, tau_j+1]
+      U <- DrawTrunNormal(0, 1, Tau.aug[c], Tau.aug[c + 1])
+      # Enforce observed values
+      U[u.obs.idx] <- U.obs
+      Tau <- Tau.aug[2:m]
+    } else {
+      # If no U is observed, just sort random points as initial knots
+      Tau <- sort(rnorm(m - 1, (u.lb + u.ub) / 2, 1))
+      Tau.aug <- c(u.lb, Tau, u.ub)
+      U <- DrawTrunNormal(0, 1, Tau.aug[c], Tau.aug[c + 1])
+    }
+    # Return U as a matrix to maintain consistency with Nominal output
+    return(list(U0 = as.matrix(U), Tau0 = Tau, Tau.aug0 = Tau.aug))
+  }
+}
+```
+
+
+## Prediction
