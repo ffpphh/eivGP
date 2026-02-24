@@ -1,0 +1,469 @@
+#Gibbs
+
+Including Gibbs Sampling for multi-case with different objects.
+
+-   Gibbs for general model,
+-   Gibbs for hyper parameter (Empirical Bayes)
+-   Gibbs for U.star (Generate new u.star)
+## General Gibbs for All Parameter
+```{r}
+#' Unified Gibbs Sampler for EIV-GP Regression
+#' 
+#' This is the core MCMC engine of the EIV-GP framework. It performs joint 
+#' posterior inference for latent variables U and all model parameters, 
+#' supporting both Nominal (Stochastic Stick-breaking) and Ordinal (Deterministic 
+#' Step Function) error mechanisms.
+#'
+#' @param type Character; "nominal" or "ordinal".
+#' @param seed Random seed for reproducibility.
+#' @param num.iter Total number of MCMC iterations.
+#' @param lmd Step size (lambda) for the Langevin Monte Carlo (LMC) update.
+#' @param B.tilde0,Sigma.u0 Initial parameters for the latent prior p(u|x).
+#' @param sigma.error20 Initial GP measurement noise variance.
+#' @param gamma.mat0 Initial coefficients for nominal classifier (Required if type="nominal").
+#' @param Tau0 Initial knots for ordinal step function (Required if type="ordinal").
+#' @param U0 Initial latent variables matrix (n x d).
+#' @param m Number of categorical levels.
+#' @param c Observed qualitative input vector.
+#' @param X Observed quantitative input matrix.
+#' @param y Observed response vector.
+#' @param u.obs.idx Indices where latent U is observed (anchors).
+#' @param U.obs Observed values of U at u.obs.idx.
+#' @param u.lb,u.ub Hard bounds for U (mainly used for Ordinal truncation).
+#' @param v0,g,nu0,Psi0 Hyperparameters for the latent prior p(u|x).
+#' @param q0,q.gamma Hyperparameters for the nominal classifier prior p(gamma).
+#' @param IG.a.u,IG.b.u Hyperparameters for the prior p(Sigma.u).
+#' @param IG.a.error,IG.b.error Hyperparameters for the prior p(sigma.error2).
+#' @param theta GP length-scale parameters (theta_x, theta_u).
+#' @param rho GP signal-to-noise ratio parameter.
+#' @param simu.f Logical; if TRUE, samples hidden GP values f (expensive).
+#' @param design.map Logical; if TRUE, uses the "Optional Design Modeling Strategy" (Innovation #3).
+#' 
+#' @return A list containing posterior samples for all relevant parameters:
+#'   \item{U.hist}{History of latent variables U (n x d x iter).}
+#'   \item{B.tilde.hist}{History of prior coefficients B.}
+#'   \item{Sigma.u.hist}{History of prior covariance Sigma.u.}
+#'   \item{sigma.error2.hist}{History of GP noise variance.}
+#'   \item{gamma.mat.hist}{History of nominal coefficients (NULL if ordinal).}
+#'   \item{Tau.hist}{History of ordinal knots (NULL if nominal).}
+#'   \item{accep}{Acceptance indicators for the LMC step.}
+#'   \item{f.hist}{History of sampled GP function values.}
+Gibbs <- function (type = c("nominal", "ordinal"),
+                           seed = 123, num.iter = 1000, lmd = 0.1,
+                           B.tilde0, Sigma.u0, sigma.error20, 
+                           gamma.mat0 = NULL, Tau0 = NULL, U0, 
+                           m, c, X, y, u.obs.idx, U.obs, u.lb = -Inf, u.ub = Inf,
+                           v0, g, nu0, Psi0, q0, q.gamma, 
+                           IG.a.u, IG.b.u, IG.a.error, IG.b.error,
+                           theta, rho, simu.f = TRUE, design.map = FALSE) {
+  
+  if(!is.null(seed)) set.seed(seed)
+  type <- match.arg(type)
+  
+  # --- 1. Constants and Pre-computation ---
+  n <- length(y); d.x <- ncol(X); d <- ncol(U0)
+  n.obs <- length(u.obs.idx)
+  u.mis.idx <- if (n.obs > 0) (1:n)[-u.obs.idx] else (1:n)
+  
+  # Latent Prior p(u|x) setup
+  X.tilde <- cbind(1, X); XX.tilde <- t(X.tilde) %*% X.tilde
+  V0 <- matrix(0, d.x+1, d.x+1); V0[1,1] <- v0; V0[-1,-1] <- g * XX.tilde[-1,-1]
+  Vn <- V0 + XX.tilde; Vn.inv <- solve(Vn)
+  
+  # Type-specific setup
+  if (type == "nominal") {
+    bin.encoding <- BinaryEncode(c, m)
+    N.mat <- bin.encoding$N.mat; kappa.mat <- bin.encoding$kappa.mat
+    Q0.gamma <- diag(c(q0, rep(q.gamma, d)))
+    omega.mat <- matrix(0, n, m-1)
+  }
+  
+  # Innovation #3: Optional Design Modeling Strategy (Anchoring)
+  if (design.map && n.obs > 0) {
+    X.obs <- X.tilde[u.obs.idx, , drop=FALSE]
+    Vn.obs <- V0 + t(X.obs)%*%X.obs; Vn.obs.inv <- solve(Vn.obs)
+    Mn.obs <- Vn.obs.inv %*% t(X.obs) %*% U.obs
+    Psin.obs <- Psi0 + t(U.obs)%*%U.obs - t(Mn.obs)%*%Vn.obs%*%Mn.obs
+    B.tilde.map <- Mn.obs
+    Sigma.u.map <- Psin.obs / (nu0 + n.obs + d.x + d + 2)
+  }
+
+  # --- 2. Initialize Storage and Parameters ---
+  B.tilde.hist <- matrix(0, d.x + 1, d * num.iter)
+  Sigma.u.hist <- matrix(0, d, d * num.iter)
+  sigma.error2.hist <- rep(0, num.iter)
+  U.hist <- matrix(0, n, d * num.iter)
+  f.hist <- matrix(0, n, num.iter)
+  accep <- rep(0, num.iter)
+  
+  if (type == "nominal") {
+    gamma.mat.hist <- matrix(0, m - 1, (d + 1) * num.iter)
+    Tau.hist <- NULL
+  } else {
+    Tau.hist <- matrix(0, m - 1, num.iter)
+    gamma.mat.hist <- NULL
+  }
+
+  # Initial values
+  B.tilde <- B.tilde0; Sigma.u <- Sigma.u0; sigma.error2 <- sigma.error20
+  gamma.mat <- gamma.mat0; Tau <- Tau0; U <- U0
+  if (n.obs > 0) U[u.obs.idx, ] <- U.obs
+
+  # GP Initial Structure
+  Theta <- c(theta, rho^2*sigma.error2)
+  W <- cbind(X, U); KWW <- KernelMatrix(W, Theta)
+  C <- KWW + sigma.error2*diag(n); C.chol <- t(chol(C))
+  r <- backsolve(t(C.chol), forwardsolve(C.chol, y))
+
+  # --- 3. Main Gibbs Loop ---
+  for (k in 1:num.iter) {
+    
+    # Step A: Update {B, Sigma.u} (Appendix A)
+    if (design.map) {
+      B.tilde <- B.tilde.map; Sigma.u <- Sigma.u.map
+    } else {
+      Mn <- Vn.inv %*% t(X.tilde) %*% U
+      Psin <- Psi0 + t(U) %*% U - t(Mn) %*% Vn %*% Mn
+      Sigma.u <- rinvwishart(nu0 + n, Psin) # Note: requires MCMCpack or custom
+      B.tilde <- rmatrixnorm(Mn, Vn.inv, Sigma.u)
+    }
+    
+    # Step B: Update GP Noise Variance sigma.error2 (Section 4.3)
+    sigma.error2.prime <- 1/rgamma(1, shape = IG.a.error + n/2, 
+                                   rate = IG.b.error + 0.5 * sigma.error2 * t(y) %*% r)
+    Theta <- c(theta, rho^2*sigma.error2.prime)
+    KWW <- (sigma.error2.prime/sigma.error2)*KWW; C <- (sigma.error2.prime/sigma.error2)*C
+    C.chol <- sqrt(sigma.error2.prime/sigma.error2)*C.chol; r <- (sigma.error2/sigma.error2.prime)*r
+    sigma.error2 <- sigma.error2.prime
+    
+    # Step C: Update Error Mechanism and Gradient Helpers
+    mn.u <- matrix(0, n, d); Qn.u <- array(0, c(d, d, n)) 
+    
+    if (type == "nominal") {
+      # C.1 Nominal: Polya-Gamma and Multi-logistic coefficients
+      U.tilde <- cbind(1, U); psi.mat <- U.tilde %*% t(gamma.mat)
+      omega.mat[N.mat == 1] <- pgdraw::pgdraw(1, psi.mat[N.mat == 1])
+      for (j in 1:(m-1)) {
+        Qn.gamma <- Q0.gamma + t(U.tilde) %*% diag(omega.mat[, j]) %*% U.tilde
+        Qn.gamma.inv <- solve(Qn.gamma)
+        gamma.mat[j, ] <- rmvnorm(1, Qn.gamma.inv %*% t(U.tilde) %*% kappa.mat[, j], Qn.gamma.inv)
+      }
+      # Precision matrices for the nominal gradient (Eq 32)
+      Sigma.u.inv <- solve(Sigma.u)
+      for (i in 1:n) {
+        Qn.u[,,i] <- Sigma.u.inv + t(gamma.mat[,-1]) %*% diag(omega.mat[i,]) %*% gamma.mat[,-1]
+        mn.u[i, ] <- solve(Qn.u[,,i]) %*% (Sigma.u.inv %*% t(B.tilde) %*% X.tilde[i,] + 
+                        t(gamma.mat[,-1]) %*% (kappa.mat[i,] - omega.mat[i,] * gamma.mat[, 1]))
+      }
+    } else {
+      # C.2 Ordinal: Update knots Tau (Section 5.1.2)
+      for (j in 1:(m-1)) Tau[j] <- runif(1, max(U[c == j, 1]), min(U[c == j+1, 1]))
+    }
+    
+    # Step D: Langevin Monte Carlo (LMC) Update for U (Section 4.3.1)
+    # D.1 Determinant-free auxiliary variable
+    phi <- backsolve(t(C.chol), rnorm(n))
+    
+    # D.2 Calculate Gradient
+    GU <- Gradient.unified(type, U, r, phi, KWW, theta[d.x+1], X.tilde, B.tilde, Sigma.u, mn.u, Qn.u)
+    
+    # D.3 Proposal Step
+    U.mis <- U[u.mis.idx, , drop=FALSE]
+    if (type == "ordinal") {
+      Tau.aug <- c(u.lb, Tau, u.ub)
+      U.mis.prime <- DrawTrunNormal(U.mis + lmd^2/2 * GU[u.mis.idx, ], rep(lmd, length(u.mis.idx)), 
+                                   Tau.aug[c[u.mis.idx]], Tau.aug[c[u.mis.idx]+1])
+    } else {
+      U.mis.prime <- U.mis + lmd^2/2 * GU[u.mis.idx, ] + lmd * matrix(rnorm(length(u.mis.idx)*d), ncol=d)
+    }
+    
+    # Step E: Metropolis-Hastings Acceptance
+    U.prime <- U; U.prime[u.mis.idx, ] <- U.mis.prime
+    W.prime <- cbind(X, U.prime); KWW.prime <- KernelMatrix(W.prime, Theta)
+    C.prime <- KWW.prime + sigma.error2*diag(n); C.prime.chol <- t(chol(C.prime))
+    r.prime <- backsolve(t(C.prime.chol), forwardsolve(C.prime.chol, y))
+    GU.prime <- Gradient.unified(type, U.prime, r.prime, phi, KWW.prime, theta[d.x+1], X.tilde, B.tilde, Sigma.u, mn.u, Qn.u)
+    
+    # Acceptance Ratio Calculation
+    if (type == "ordinal") {
+      # Ordinal requires truncation correction (log.ratio)
+      p.u <- pnorm(Tau.aug[c[u.mis.idx]+1], U.mis + lmd^2/2*GU[u.mis.idx], lmd) - 
+             pnorm(Tau.aug[c[u.mis.idx]], U.mis + lmd^2/2*GU[u.mis.idx], lmd)
+      p.u.prime <- pnorm(Tau.aug[c[u.mis.idx]+1], U.mis.prime + lmd^2/2*GU.prime[u.mis.idx], lmd) - 
+                   pnorm(Tau.aug[c[u.mis.idx]], U.mis.prime + lmd^2/2*GU.prime[u.mis.idx], lmd)
+      log.ratio <- sum(log(p.u + 1e-10)) - sum(log(p.u.prime + 1e-10))
+      
+      prior_diff <- sum((U.prime - X.tilde%*%B.tilde)^2 - (U - X.tilde%*%B.tilde)^2) / (2*Sigma.u)
+      logp <- min(0, -(t(y)%*%(r.prime - r) + t(phi)%*%(C.prime - C)%*%phi)/2 - prior_diff + 
+                    sum((U.mis.prime - U.mis - lmd^2/2*GU[u.mis.idx])^2 - 
+                        (U.mis - U.mis.prime - lmd^2/2*GU.prime[u.mis.idx])^2)/(2*lmd^2) + log.ratio)
+    } else {
+      # Nominal Prior term using the augmented Gaussian representation
+      logp.gau <- sapply(u.mis.idx, function(i) 
+                  t(U.prime[i,] - mn.u[i,]) %*% Qn.u[,,i] %*% (U.prime[i,] - mn.u[i,]) - 
+                  t(U[i,] - mn.u[i,]) %*% Qn.u[,,i] %*% (U[i,] - mn.u[i,]))
+      
+      logp <- min(0, -sum(logp.gau)/2 - (t(y)%*%(r.prime - r) + t(phi)%*%(C.prime - C)%*%phi)/2 + 
+                    sum((U.mis.prime - U.mis - lmd^2/2*GU[u.mis.idx,])^2 - 
+                        (U.mis - U.mis.prime - lmd^2/2*GU.prime[u.mis.idx,])^2)/(2*lmd^2))
+    }
+    
+    if (log(runif(1)) <= logp) {
+      U <- U.prime; W <- W.prime; KWW <- KWW.prime; C <- C.prime; C.chol <- C.prime.chol
+      r <- r.prime; accep[k] <- 1
+    }
+    
+    # Step F: Latent Data and Function Sampling
+    U.hist[, ((k-1)*d+1):(k*d)] <- U
+    sigma.error2.hist[k] <- sigma.error2
+    B.tilde.hist[, ((k-1)*d+1):(k*d)] <- B.tilde
+    Sigma.u.hist[, ((k-1)*d+1):(k*d)] <- Sigma.u
+    if (type == "nominal") gamma.mat.hist[, ((k-1)*(d+1)+1):(k*(d+1))] <- gamma.mat
+    if (type == "ordinal") Tau.hist[, k] <- Tau
+    
+    if (simu.f) {
+      LiK <- apply(KWW, 2, function(b) forwardsolve(C.chol, b)) 
+      f.hist[, k] <- rmvnorm(1, KWW %*% r, KWW - t(LiK)%*%LiK)
+    }
+  }
+  
+  return(list(U.hist = U.hist, B.tilde.hist = B.tilde.hist, Sigma.u.hist = Sigma.u.hist,
+              sigma.error2.hist = sigma.error2.hist, gamma.mat.hist = gamma.mat.hist, 
+              Tau.hist = Tau.hist, accep = accep, f.hist = f.hist))
+}
+```
+## Empirical Bayes Gibbs Sampler
+```{r}
+#' Unified Empirical Bayes Gibbs Sampler for EIV-GP
+#' 
+#' This function implements the simplified MCMC sampler described in Section 4.4. 
+#' It samples the latent variables U and classification parameters given ONLY the 
+#' qualitative and quantitative inputs (c, X). This is used to estimate the 
+#' marginal likelihood for hyperparameter optimization (Empirical Bayes).
+#'
+#' @param type Character; "nominal" or "ordinal".
+#' @param n.mc Number of MCMC iterations.
+#' @param B.tilde0,Sigma.u0 Initial parameters for the prior p(u|x).
+#' @param gamma.mat0 Initial nominal coefficients (Required if nominal).
+#' @param Tau0 Initial ordinal knots (Required if ordinal).
+#' @param U0 Initial latent variables matrix (n x d).
+#' @param X,c,m Data inputs.
+#' @param u.obs.idx,U.obs Anchoring data for latent variables.
+#' @param v0,g,nu0,Psi0,q0,q.gamma Hyperparameters for priors.
+#' @param IG.a.u,IG.b.u Hyperparameters for p(Sigma.u) in ordinal case.
+#' @param u.lb,u.ub Truncation bounds for ordinal U.
+#' 
+#' @return A list of posterior samples (histories) for parameters and U.
+Gibbs.EB <- function (type = c("nominal", "ordinal"),
+                              seed = 123, n.mc = 1000,
+                              B.tilde0, Sigma.u0, 
+                              gamma.mat0 = NULL, Tau0 = NULL, U0,
+                              X, c, m, u.obs.idx, U.obs,
+                              v0, g, nu0 = NULL, Psi0 = NULL, q0 = NULL, q.gamma = NULL,
+                              IG.a.u = NULL, IG.b.u = NULL,
+                              u.lb = -Inf, u.ub = Inf) {
+  
+  if(!is.null(seed)) set.seed(seed)
+  type <- match.arg(type)
+  
+  # --- 1. Constants and Pre-computation ---
+  n <- nrow(X); d.x <- ncol(X); d <- ncol(U0)
+  u.mis.idx <- if (length(u.obs.idx) > 0) (1:n)[-u.obs.idx] else (1:n)
+  
+  X.tilde <- cbind(1, X); XX.tilde <- t(X.tilde) %*% X.tilde
+  V0 <- matrix(0, d.x+1, d.x+1); V0[1,1] <- v0; V0[-1,-1] <- g * XX.tilde[-1,-1]
+  Vn <- V0 + XX.tilde; Vn.inv <- solve(Vn)
+  
+  if (type == "nominal") {
+    bin.encoding <- BinaryEncode(c, m)
+    N.mat <- bin.encoding$N.mat; kappa.mat <- bin.encoding$kappa.mat
+    Q0.gamma <- diag(c(q0, rep(q.gamma, d)))
+    omega.mat <- matrix(0, n, m-1)
+  }
+  
+  # --- 2. Initialize Storage and Parameters ---
+  B.tilde.hist <- matrix(0, d.x + 1, d * n.mc)
+  Sigma.u.hist <- matrix(0, d, d * n.mc)
+  U.hist <- matrix(0, n, d * n.mc)
+  
+  if (type == "nominal") {
+    gamma.mat.hist <- matrix(0, m - 1, (d + 1) * n.mc)
+    Tau.hist <- NULL
+    gamma.mat <- gamma.mat0
+  } else {
+    Tau.hist <- matrix(0, m - 1, n.mc)
+    gamma.mat.hist <- NULL
+    Tau <- Tau0
+  }
+  
+  B.tilde <- B.tilde0; Sigma.u <- Sigma.u0; U <- U0
+  if (length(u.obs.idx) > 0) U[u.obs.idx, ] <- U.obs
+
+  # --- 3. Gibbs Loop ---
+  for (k in 1:n.mc) {
+    
+    # Step A: Update Prior Parameters {B, Sigma.u} (Section 4.2 / Appendix A)
+    # This part is unified for both types
+    if (type == "nominal") {
+      # Matrix Normal-Inverse Wishart for Nominal
+      Mn <- Vn.inv %*% t(X.tilde) %*% U
+      Psin <- Psi0 + t(U) %*% U - t(Mn) %*% Vn %*% Mn
+      Sigma.u <- rinvwishart(nu0 + n, Psin)
+      B.tilde <- rmatrixnorm(Mn, Vn.inv, Sigma.u)
+    } else {
+      # Conjugate Normal-Inverse Gamma for Ordinal (d=1)
+      mu.n <- Vn.inv %*% t(X.tilde) %*% U
+      sigma.u2 <- 1/rgamma(1, shape = IG.a.u + n/2, rate = IG.b.u + (t(U)%*%U - t(mu.n)%*%Vn%*%mu.n)/2)
+      beta <- c(rmvnorm(1, mu.n, sigma.u2 * Vn.inv))
+      # Cast back to standard matrix form for history
+      B.tilde <- as.matrix(beta); Sigma.u <- as.matrix(sigma.u2)
+    }
+    
+    # Step B: Update Classification Parameters
+    if (type == "nominal") {
+      # Nominal: Polya-Gamma and Gamma update
+      U.tilde <- cbind(1, U); psi.mat <- U.tilde %*% t(gamma.mat)
+      omega.mat[N.mat == 1] <- pgdraw::pgdraw(1, psi.mat[N.mat == 1])
+      for (j in 1:(m-1)) {
+        Qn.gamma <- Q0.gamma + t(U.tilde) %*% diag(omega.mat[, j]) %*% U.tilde
+        Qn.gamma.inv <- solve(Qn.gamma)
+        gamma.mat[j, ] <- rmvnorm(1, Qn.gamma.inv %*% t(U.tilde) %*% kappa.mat[, j], Qn.gamma.inv)
+      }
+    } else {
+      # Ordinal: Update knots Tau based on current U
+      for (j in 1:(m-1)) Tau[j] <- runif(1, max(U[c == j, 1]), min(U[c == j+1, 1]))
+    }
+    
+    # Step C: Sample Missing U (Conditioned on Categories but NOT Y)
+    if (type == "nominal") {
+      # Nominal: Sample from the augmented Gaussian conditional (Eq 32)
+      Sigma.u.inv <- solve(Sigma.u)
+      for (i in u.mis.idx) {
+        # Conditional Precision Q and Mean m
+        Qn.u <- Sigma.u.inv + t(gamma.mat[,-1]) %*% diag(omega.mat[i,]) %*% gamma.mat[,-1]
+        Qn.u.inv <- solve(Qn.u)
+        mn.u <- Qn.u.inv %*% (Sigma.u.inv %*% t(B.tilde) %*% X.tilde[i,] + 
+                             t(gamma.mat[,-1]) %*% (kappa.mat[i,] - omega.mat[i,] * gamma.mat[,1]))
+        U[i, ] <- rmvnorm(1, mn.u, Qn.u.inv)
+      }
+    } else {
+      # Ordinal: Sample from the Truncated Normal defined by knots Tau
+      Tau.aug <- c(u.lb, Tau, u.ub)
+      U[u.mis.idx, 1] <- DrawTrunNormal(X.tilde[u.mis.idx, ] %*% B.tilde, 
+                                       rep(sqrt(Sigma.u[1,1]), length(u.mis.idx)), 
+                                       Tau.aug[c[u.mis.idx]], Tau.aug[c[u.mis.idx]+1])
+    }
+    
+    # Step D: Save Histories
+    U.hist[, ((k-1)*d+1):(k*d)] <- U
+    B.tilde.hist[, ((k-1)*d+1):(k*d)] <- B.tilde
+    Sigma.u.hist[, ((k-1)*d+1):(k*d)] <- Sigma.u
+    if (type == "nominal") gamma.mat.hist[, ((k-1)*(d+1)+1):(k*(d+1))] <- gamma.mat
+    if (type == "ordinal") Tau.hist[, k] <- Tau
+  }
+  
+  return(list(B.tilde.hist = B.tilde.hist, Sigma.u.hist = Sigma.u.hist,
+              gamma.mat.hist = gamma.mat.hist, Tau.hist = Tau.hist, U.hist = U.hist))
+}
+```
+## U.star Generator
+```{r}
+#' Unified Latent Variable Sampler for Test Points (U*)
+#' 
+#' This function generates samples of latent variables U* for new test points 
+#' (X*, c*) given the posterior samples of model parameters. It implements 
+#' the logic described in Section 4.5 and Section 5.2.3.
+#'
+#' @param type Character; "nominal" or "ordinal".
+#' @param X.star Matrix of new quantitative inputs (n.star x px).
+#' @param c.star Vector of new qualitative inputs (n.star).
+#' @param samples A list containing posterior histories from Gibbs.
+#' @param m Number of categories.
+#' @param inner.iter Number of inner-loop Gibbs iterations (only for nominal).
+#' @param u.lb,u.ub Truncation bounds (only for ordinal).
+#' @param U0 Initial U* for the inner-loop (only for nominal).
+#' @param seed Random seed for reproducibility.
+#' 
+#' @return A matrix (n.star x d*n.mc) containing sampled U* for all posterior iterations.
+Gibbs.Ustar.unified <- function (type = c("nominal", "ordinal"),
+                                 X.star, c.star, samples, m, 
+                                 inner.iter = 10, 
+                                 u.lb = -Inf, u.ub = Inf, 
+                                 U0 = NULL, seed = 222) {
+  
+  if(!is.null(seed)) set.seed(seed)
+  type <- match.arg(type)
+  
+  # --- 1. Constants and Dimensions ---
+  n.star <- length(c.star)
+  d.x <- ncol(X.star)
+  X.star.tilde <- cbind(1, X.star)
+  
+  # Determine latent dimension d and number of posterior samples n.mc
+  if (type == "nominal") {
+    d <- ncol(samples$U.hist) / (ncol(samples$f.hist)) # Derived d
+    n.mc <- ncol(samples$f.hist)
+    # Prepare binary encoding for stick-breaking (Section 2.3.2)
+    bin.encoding <- BinaryEncode(c.star, m)
+    N.mat <- bin.encoding$N.mat
+    kappa.mat <- bin.encoding$kappa.mat
+  } else {
+    d <- 1
+    n.mc <- ncol(samples$U.hist)
+  }
+  
+  # Output Storage
+  U.star.hist <- matrix(0, n.star, d * n.mc)
+
+  # --- 2. Main Loop over Posterior Samples ---
+  for (idx in 1:n.mc) {
+    
+    # Extract parameters for the current posterior sample
+    B.tilde <- samples$B.tilde.hist[, ((idx-1)*d+1):(idx*d), drop=FALSE]
+    Sigma.u <- samples$Sigma.u.hist[, ((idx-1)*d+1):(idx*d), drop=FALSE]
+    
+    if (type == "ordinal") {
+      # --- ORDINAL CASE (Direct Truncated Normal Draw) ---
+      Tau <- samples$Tau.hist[, idx]
+      Tau.aug <- c(u.lb, Tau, u.ub)
+      
+      # Corresponding to Section 5.1.3: u* ~ TruncatedNormal(x*beta, sigma_u, tau_c, tau_c+1)
+      U.star <- DrawTrunNormal(X.star.tilde %*% B.tilde, 
+                               rep(sqrt(Sigma.u[1,1]), n.star), 
+                               Tau.aug[c.star], Tau.aug[c.star + 1])
+      U.star.hist[, idx] <- U.star
+      
+    } else {
+      # --- NOMINAL CASE (Inner-loop Gibbs for Stick-breaking) ---
+      # For Nominal, u* and omega* are coupled. We run a short Gibbs chain.
+      gamma.mat <- samples$gamma.mat.hist[, ((idx-1)*(d+1)+1):(idx*(d+1))]
+      Sigma.u.inv <- solve(Sigma.u)
+      
+      # Initialize U* and omega* for this posterior sample
+      U.curr <- if(is.null(U0)) matrix(0, n.star, d) else U0
+      omega.mat <- matrix(0, n.star, m - 1)
+      
+      for (k in 1:inner.iter) {
+        # Update Polya-Gamma omega* (Appendix B)
+        U.tilde <- cbind(1, U.curr)
+        psi.mat <- U.tilde %*% t(gamma.mat)
+        omega.mat[N.mat == 1] <- pgdraw::pgdraw(1, psi.mat[N.mat == 1])
+        
+        # Update U* (Gaussian draw based on Equation 32)
+        for (i in 1:n.star) {
+          # Conditional Precision and Mean
+          Qn.u <- Sigma.u.inv + t(gamma.mat[,-1]) %*% diag(omega.mat[i,]) %*% gamma.mat[,-1]
+          Qn.u.inv <- solve(Qn.u)
+          mn.u <- Qn.u.inv %*% (Sigma.u.inv %*% t(B.tilde) %*% X.star.tilde[i,] + 
+                               t(gamma.mat[,-1]) %*% (kappa.mat[i,] - omega.mat[i,] * gamma.mat[,1]))
+          U.curr[i, ] <- rmvnorm(1, mn.u, Qn.u.inv)
+        }
+      }
+      # Store the result from the last inner-loop iteration
+      U.star.hist[, ((idx-1)*d+1):(idx*d)] <- U.curr
+    }
+  }
+  
+  return(U.star.hist)
+}
+```
