@@ -1,0 +1,475 @@
+# Helpers functions
+
+These are some helper functions which are used for computation and graph drawing.
+
+## General Helpers for computation (see in file basic_common.R)
+
+### Computation Function.
+
+A Useful tool to Computation. Including:
+
+-   Kernel Matrix
+
+-   Energy Distance
+
+-   Gradient
+
+```{r}
+#' Compute the kernel matrix K_{WV} with the inverse exponential squared kernel.
+#' 
+#' @param W: The data matrix with each row being an observation.
+#' @param Theta: The last one is the overall variance, and the rest are lengthscales.
+#' @param V: The second data matrix, by default is the same as W.
+#' 
+#' @export Kernel Matrix
+KernelMatrix <- function (W, Theta, V = NULL, eps = 0) {
+  if (length(Theta) != ncol(W)+1) {
+    stop("Wrong number of kernel parameters!")
+  }
+  if (any(Theta < 0)) {
+    stop('Negative kernel parameter!')
+  }
+  
+  if (is.null(V)) 
+    V <- W
+  if (nrow(W) <= nrow(V)) {
+    K <- t(sapply(1:nrow(W), function(idx) exp(-apply((t(V)-W[idx,])^2*Theta[1:ncol(W)], 2, sum))))
+  } else {
+    K <- sapply(1:nrow(V), function(idx) exp(-apply((t(W)-V[idx,])^2*Theta[1:ncol(W)], 2, sum)))
+  }
+  K <- Theta[ncol(W)+1]*K  # Scale the kernel matrix
+  if (is.null(V) && eps>0) {
+    diag(K) <- diag(K) + eps # add a small perturbation to the kernel matrix for numerical inversion
+  }
+  return(K)
+}
+
+#' Compute energy distance.
+#' 
+#' @param X: predictions (a vector);
+#' @param Y: samples from the target
+#' 
+#' @export 2*E|X-Y| - E|X-X'| - E|Y-Y'|
+EnergyDistance <- function (X, Y) {
+  n <- length(X)
+  m <- length(Y)
+  sxy <- 0
+  sxx <- 0
+  syy <- 0
+  for (i in 1:n) {
+    for (j in 1:m) {
+      sxy <- sxy + abs(X[i] - Y[j])
+    }
+  }
+  for (i in 1:n) {
+    for (j in 1:n) {
+      sxx <- sxx + abs(X[i] - X[j])
+    }
+  }
+  for (i in 1:m) {
+    for (j in 1:m) {
+      syy <- syy + abs(Y[i] - Y[j])
+    }
+  }
+  return(2*sxy/(n*m) - sxx/n^2 - syy/m^2)
+}
+```
+
+```{r}
+#' Unified Gradient Calculation for Latent Variables (EIV-GP)
+#' 
+#' @param type: Character string, either "ordinal" or "nominal".
+#' @param U: Current latent variables (n x d).
+#' @param r: weighted residuals C_nn^-1 * (y - h).
+#' @param phi: Auxiliary variable for determinant-free trick.
+#' @param K: GP kernel matrix.
+#' @param length.scale.u: GP length-scale for latent space (theta_u).
+#' @param X.tilde: Augmented continuous inputs (for ordinal prior).
+#' @param beta: Linear coefficients (for ordinal prior).
+#' @param sigma.u2: Prior variance (for ordinal prior).
+#' @param mn.u: Conditional mean matrix (for nominal conditional).
+#' @param Qn.u: Conditional precision array (for nominal conditional).
+#' 
+#' @export D.U: Gradient matrix (n x d).
+Gradient <- function(type = c("ordinal", "nominal"), 
+                             U, r, phi, K, length.scale.u, 
+                             X.tilde = NULL, beta = NULL, sigma.u2 = NULL, 
+                             mn.u = NULL, Qn.u = NULL) {
+  
+  n <- nrow(U)
+  
+  # --- 1.COMMON LIKELIHOOD GRADIENT ---
+  # This part is identical for both types as it handles the GP mapping f(x,u)
+  C.tilde <- (phi %*% t(phi) - r %*% t(r)) * K
+  row_sums <- apply(C.tilde, 1, sum)
+  D.U <- 2 * length.scale.u * (diag(row_sums) - C.tilde) %*% U
+  
+  # --- 2.Gaussian Prior/Conditional Part ---
+  if (type == "ordinal") {
+    # Simple linear prior: u ~ N(X*beta, sigma.u^2)
+    # Gradient: -(u - X*beta) / sigma.u^2
+    D.U <- D.U - (U - X.tilde %*% beta) / sigma.u2
+    
+  } else if (type == "nominal") {
+    # Complex augmented conditional (Eq 32): u_i ~ N(mn_i, Qn_i^-1)
+    # This combines the linear prior and the stick-breaking likelihood info.
+    for (i in 1:n) {
+      D.U[i, ] <- D.U[i, ] - Qn.u[,,i] %*% (U[i,] - mn.u[i,])
+    }
+  }
+  
+  return(D.U)
+}
+```
+
+
+### Prediction Function
+
+We develop some techniques to estimate hyper parameters and predict output y.
+
+```{r}
+#' Apply to both ordinal and nominal cases.  ##MAYBE PUT IN SIMULATION
+#' Given hyper-parameter (rho, theta), estimate the marginal likelihood up to a constant factor by Monte Carlo.
+#' 
+#' @param theta: lengthscales of x and u
+#' @param rho: signal-to-noise ratio. That is, the GP variance is rho^2*sigma.error2.
+#' @param U.hist: Samples of U from p(U|X, c); 
+#' @param d: the dimension of u
+#' @param IG.a.error: parameters of the IG prior for sigma.error2
+#' @param IG.b.error: parameters of the IG prior for sigma.error2
+#' 
+#' @export A vector storing the samples of marginal likelihood.
+EstimateEvidence <- function (theta, rho,
+                              U.hist,
+                              IG.a.error, IG.b.error,
+                              X, y, d = 1) {
+  n <- nrow(U.hist)
+  n.mc <- ncol(U.hist)%/%d
+  mar.likelihood.hist <- rep(0, n.mc)
+  for (k in 1:n.mc) {
+    U <- U.hist[, ((k-1)*d+1):(k*d), drop = FALSE]
+    C <- KernelMatrix(W = cbind(X, U), Theta = c(theta, rho^2)) + diag(n)
+    C.chol <- t(chol(C)) # the (lower-triangular) Cholesky factor of C, i.e., C = C.chol%*%t(C.chol)
+    det.C <- prod(diag(C.chol))^2
+    #det.C <- c(determinant(C, logarithm = FALSE)$modulus) # C>0
+    r <- forwardsolve(C.chol, y)
+    a.tilde <- IG.a.error + n/2
+    b.tilde <- IG.b.error + sum(r^2)/2
+    #b.tilde <- IG.b.error + t(y)%*%solve(C)%*%y/2
+    mar.likelihood.hist[k] <- b.tilde^(-a.tilde)/sqrt(det.C)
+  }
+  return(mar.likelihood.hist)
+}  
+
+#'Predict y by kriging (given U.star). ##MAYBE PUT IN SIMULATION
+#'
+#' @param d: the dimension of u
+#' @param y: observed y
+#' @param X：observed x
+#' @param X.star: X to be tested or predicted
+#' @param sigma.error2.hist: variance parameter for epsilon ## NOT SURE
+#' @param U.hist: observed U, can be null or empty
+#' @param U.star.hist: initializer for updating process. ## NOT SURE
+#' @param theta: lengthscales of x and u
+#' @param rho: signal-to-noise ratio. That is, the GP variance is rho^2*sigma.error2.
+#' @param single.ustar: whether the goal is to predict at a fixed u.star.
+#' 
+#' @export y_and_model_predicted.
+Predict.y <- function (d, y, X, X.star, 
+                       sigma.error2.hist, U.hist, U.star.hist,
+                       theta, rho, single.ustar = FALSE, separate = FALSE, seed = 888) {
+  if (!is.null(seed)) {
+    set.seed(seed)
+  }
+  
+  # Constants ----
+  n.mc <- length(sigma.error2.hist)  # number of repeated samples to draw
+  n.star <- nrow(X.star)  # number of new samples
+  
+  # Empty matrices ----
+  f.predict.hist <- matrix(0, nrow = n.star, ncol = n.mc)
+  y.predict.hist <- matrix(0, nrow = n.star, ncol = n.mc)
+  
+  # Sampler ----
+  for (idx in 1:n.mc) {
+    # Draw latent u.star
+    sigma.error2 <- sigma.error2.hist[idx]  
+    U <- U.hist[, ((idx-1)*d+1):(idx*d), drop = FALSE]
+    if (single.ustar) {
+      U.star <- U.star.hist
+    } else {
+      U.star <- U.star.hist[, ((idx-1)*d+1):(idx*d), drop = FALSE]
+    }
+    
+    # Draw y.star ----
+    Theta <- c(theta, rho^2*sigma.error2)
+    W <- cbind(X, U)
+    W.star <- cbind(X.star, U.star)
+    KWW <- KernelMatrix(W = W, Theta = Theta)
+    C <- KWW + sigma.error2*diag(n)
+    Ci <- solve(C)
+    KstarW <- KernelMatrix(W = W.star, Theta = Theta, V = W)
+    
+    if (separate) {
+      sdv <-  sqrt(rho^2*sigma.error2 - apply(KstarW, 1, function(x) t(x)%*%Ci%*%x))
+      f.predict.hist[, idx] <- KstarW%*%Ci%*%y + rnorm(n.star)*sdv
+    } else {
+      Kstar <- KernelMatrix(W = W.star, Theta = Theta)
+      var.star <- Kstar - KstarW%*%Ci%*%t(KstarW)
+      var.star <- as.symmetric.matrix(var.star)  #in case of numerical error
+      f.predict.hist[, idx] <- rmvnorm(1, KstarW%*%Ci%*%y, var.star)  # kriging
+    }
+    y.predict.hist[, idx] <- f.predict.hist[, idx] + rnorm(n.star, 0, sqrt(sigma.error2))
+  }
+  
+  # Return ----
+  return(list(f.predict.hist = f.predict.hist,
+              y.predict.hist = y.predict.hist))
+}
+```
+
+### Other Function
+
+```{r}
+#' TBD
+#' 
+#' @param x: TBD
+GetMode <- function(x) {
+  ux <- unique(x)
+  ux[which.max(tabulate(match(x, ux)))]
+}
+
+```
+
+## Nominal Case Only
+
+Computation for nominal case. Including:
+
+-   Stick.Breaking Process
+
+-   xexp
+
+Below function predicts U.
+
+```{r}
+#' This function predicts U using the true parameter and classifier
+#' 
+#' @param X：Continuous input matrix (n x px).
+#' @param c：Vector of observed categorical labels (1 to m).
+#' @param B.tilde: Estimated coefficients for the linear model p(u|x).
+#' @param Sigma.u: Estimated covariance matrix for the linear model p(u|x).
+#' @param f：The classifier/mapping function: u -> c.
+#' @param uniform: Logical; if TRUE, samples candidates from a Uniform distribution. 
+#'        If FALSE, samples from the Gaussian prior N(X*B, Sigma.u).
+#' @param u.lb: Lower bound for Uniform sampling (used if uniform=TRUE).
+#' @param u.ub: Upper bound for Uniform sampling (used if uniform=TRUE).
+#' @param n.mc: Number of Monte Carlo samples to draw for each observation.
+#' @param seed: Random seed for reproducibility.
+#' 
+#' @export a list store U generated and some counts for rejection sampling
+Predict.U.oracle <- function (X, c, B.tilde, Sigma.u, f, uniform = FALSE, u.lb = NULL, u.ub = NULL, n.mc = 1000, seed = 999) {
+  set.seed(seed)
+  
+  # Initialize ----
+  n <- length(c)
+  d <- ncol(Sigma.u)
+  cnt <- matrix(0, n, n.mc)
+  U.hist <- matrix(0, n, d*n.mc)
+  X.tilde <- cbind(1, X)
+  mean.u <- X.tilde%*%B.tilde
+  Chol.u <- t(chol(Sigma.u))
+  
+  # Draw U ----
+  for (idx in 1:n.mc) {
+    U <- matrix(0, n, d)
+    for (i in 1:n) {
+      cntt <- 0
+      while (TRUE) {
+        cntt <- cntt + 1
+        if (!uniform) {
+          U.prime <- c(mean.u[i, ] + Chol.u%*%rnorm(d))
+        } else {
+          U.prime <- runif(d, u.lb, u.ub)
+        }
+        c.prime <- f(U.prime[1], U.prime[2])$c
+        if (c.prime == c[i]) {
+          U[i, ] <- U.prime
+          break
+        }
+      }
+      cnt[i, idx] <- cntt
+    }
+    U.hist[, ((idx-1)*d+1):(idx*d)] <- U
+  }
+  
+  return(list(U.hist = U.hist, cnt = cnt))
+}
+```
+
+Below Part is for Sticking Breaking for $p(c|u)$ under stochastic cases while $c$ is nominal. Check in
+
+```{r}
+#' Binary encoding of categorical variables
+#' 
+#' @param c: observed categorical variables in discrete space
+#' @param m: number of elements in such discrete space.
+#' 
+#' @export a list store related messages.
+BinaryEncode <- function (c, m) {
+  n <- length(c)
+  n.mat <- matrix(0, n, m)
+  N.mat <- matrix(0, n, m) 
+  for (i in 1:n) {
+    n.mat[i, c[i]] <- 1
+    N.mat[i, 1:c[i]] <- 1
+  }
+  n.mat <- n.mat[, -m]
+  N.mat <- N.mat[, -m]
+  kappa.mat <- n.mat - N.mat/2
+  return(list(n.mat = n.mat, N.mat = N.mat, kappa.mat = kappa.mat))
+}
+
+#' The mapping from (m-1) stick-breaking probabilities to m multinomial 
+#' probabilities (adding up to 1).
+#' 
+#' @param prob.tilde: m-1 Stick-breaking probabilities
+#'
+#' @export an multinomial mass function.
+StickBreak <- function (prob.tilde) {
+  m <- length(prob.tilde) + 1
+  prob.tilde <- c(prob.tilde, 1)
+  prob <- rep(0, m)
+  prob[1] <- prob.tilde[1]
+  for (j in 2:m) {
+    prob[j] <- prod(1 - prob.tilde[1:(j-1)])*prob.tilde[j]
+  }
+  return(prob)
+}
+
+#' The mapping from m multinomial probabilities (adding up to 1) to (m-1) stick
+#' -breaking probabilities
+#' 
+#' @param prob: an multinomial mass function on several points. 
+#' 
+#' @export m-1 Stick-breaking probabilities
+StickBreak.inv <- function (prob) {
+  m <- length(prob)
+  prob.tilde <- rep(0, m-1)
+  prob.tilde[1] <- prob[1]
+  for (j in 2:(m-1)){
+    prob.tilde[j] <- prob[j]/(1 - sum(prob[1:(j-1)]))
+  }
+  return(prob.tilde)
+}
+
+#' Compute Categorical Probabilities via Stick-Breaking Multinomial Logistic
+#' Regression
+#' 
+#' @param gamma.mat: coefficient matrix within intercept
+#' @param U: matrix of continues latent variable.
+#' 
+#' @export A list contain: prob,prob.tilde,linear score psi.
+Classify.stickbreak <- function (gamma.mat, U) {
+  n <- nrow(U)
+  d <- ncol(U)
+  m <- nrow(gamma.mat) + 1
+  ##
+  U.tilde <- cbind(1, U)
+  psi.mat <- U.tilde%*%t(gamma.mat)
+  prob.tilde <- 1/(1 + exp(-psi.mat))
+  prob <- matrix(0, n, m)
+  for (i in 1:n) {
+    prob[i, ] <- StickBreak(prob.tilde[i, ]) 
+  }
+  ##
+  return(list(psi.mat = psi.mat, prob.tilde = prob.tilde, prob = prob))
+}
+```
+
+```{r}
+#'
+xexp <- function (x1, x2) {
+  x <- cbind(x1, x2)
+  
+  f <- x1*exp(-x1^2 - x2^2)
+  c <- rep(0, length(f))
+  c[x2 >= 1.3] <- 1
+  c[(x2 < 1.3) & (x1 <= 0)] <- 2
+  c[(x2 < 1.3) & (x1 > 0)] <- 3
+  
+  # return
+  return(list(f = f, c = c))
+}
+```
+
+## Ordinal Case
+
+Including:
+
+-   Response Function and plot function
+
+-   Truncated Norm
+
+```{r}
+#' Ground Truth Response Functions for Numerical Experiments
+#' 
+#' @param X: Matrix of observed quantitative inputs.
+#' @param U: Matrix of latent continuous variables.
+#' @param code: Character string defining the function type.
+#' 
+#' @export A vector of noise-free response values.
+ResponseFunction <- function (X, U, code) {
+  if (code == 'sin') {
+    return(sin(U))
+  } else if (code == 'cos') {
+    return(cos(U))
+  } else if (code == 'quad') {
+    return((X + U)^2)
+  } else if (code == 'doppler') {
+    return(sqrt(U*(1-U))*sin(2.1*pi/(U+0.05)))
+  } else if (code == 'sin-step') {
+    U.ref <- c(0:4)*pi/2
+    U <- apply(U, 1, function(u) U.ref[which.min(abs(u - U.ref))])
+    return(sin(U))
+  } else if (code == 'quad-step') {
+    U.ref <- c(-1.5, -1, 0, 1, 1.5)
+    U <- apply(U, 1, function(u) U.ref[which.min(abs(u - U.ref))])
+    return((X + U)^2)
+  } else {
+    stop('Invalid code!')
+  }
+}
+
+#' Visualize the 2D Response Surface f(x, u)
+#' 
+#' @param code: Character string indicating the test function to visualize 
+#'   (e.g., 'sin', 'cos', 'quad', 'doppler').
+#' @param nx: Resolution of the grid (number of points along each axis).
+#' @param lb.u,ub.u: Lower and upper bounds for the latent U.
+#' @param lb.x,ub.x: Lower and upper bounds for the X.
+#' @export A 3D perspective plot rendered using the `plot3D::persp3D` function.
+PlotResponse <- function (code, nx = 100, lb.u = -2, ub.u = 2, lb.x = -2, ub.x = 2) {
+  x <- seq(lb.x, ub.x, length = nx)
+  u <- seq(lb.u, ub.u, length = nx)
+  W <- expand.grid(x, u)
+  y <- ResponseFunction(matrix(W[, 1], ncol = 1), matrix(W[, 2], ncol = 1), code)
+  persp3D(x, u, matrix(y, ncol = nx), xlab = "x", ylab = "u", zlab = "y")
+}
+
+```
+
+```{r}
+#' Simulate Independent Truncated Normal Variables by Inverse Probability Integral Transform.
+#' 
+#' @param mu Vector of means for the underlying normal distributions.
+#' @param sigma Vector of standard deviations.
+#' @param lb Vector of lower bounds for truncation.
+#' @param ub Vector of upper bounds for truncation.
+#' 
+#' @return A vector of samples from the truncated normal distribution(s).
+DrawTrunNormal <- function (mu, sigma, lb, ub) {
+  n <- max(length(mu), length(sigma), length(lb), length(ub))
+  u <- runif(n, pnorm(lb, mu, sigma), pnorm(ub, mu, sigma))
+  return(qnorm(u, mu, sigma))
+}
+```
