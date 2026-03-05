@@ -10,91 +10,615 @@ As we have finished step 1 and 3 before, here only initialization and prediction
 
 ## Initialization
 ```{r}
-#' Unified Initialization for Latent Variables U and Knots Tau
+#' Unified Initialization for Latent Variables
 #' 
-#' This function provides initial values for the Gibbs sampler in both 
-#' Nominal and Ordinal cases. It handles cases where some latent variables 
-#' U are observed (anchoring) and ensures constraints are met.
-#'
-#' @param type Character; "nominal" or "ordinal".
-#' @param n Total number of samples.
-#' @param m Number of categories.
-#' @param c Vector of observed qualitative inputs (1 to m).
-#' @param u.obs.idx Indices where U is observed.
-#' @param U.obs Observed values of U (Matrix for nominal, Vector for ordinal).
-#' @param u.lb,u.ub Lower and upper bounds for U (mainly for ordinal).
-#' @param seed Random seed for reproducibility.
+#' @param type String. Must be either "ordinal" or "nominal".
+#' @param params A list containing the required parameters for initialization.
+#' @param seed Optional random seed to ensure reproducibility.
 #' 
-#' @return A list containing:
-#'   \item{U0}{Initial values for latent variables U (n x d matrix).}
-#'   \item{Tau0}{Initial knots (for ordinal only, m-1 vector).}
-#'   \item{Tau.aug0}{Augmented knots (for ordinal only, m+1 vector).}
-GetInitial <- function(type = c("nominal", "ordinal"), 
-                               n, m, c, u.obs.idx, U.obs, 
-                               u.lb = -Inf, u.ub = Inf, seed = 555) {
-  set.seed(seed)
-  type <- match.arg(type)
+#' @return A list containing initial values (e.g., U0, Tau0).
+gibbs.init <- function(type, params, seed = NULL) {
   
-  if (type == "nominal") {
-    # --- NOMINAL INITIALIZATION (Section 5.2.2) ---
-    # Based on category-specific means/covariances from observed U
-    d <- ncol(U.obs)
-    U <- matrix(0, n, d)
-    
-    for (j in 1:m) {
-      # Identify observations in category j that have ground truth U
-      obs_in_j_idx <- which(c[u.obs.idx] == j)
-      
-      if (length(obs_in_j_idx) > 1) {
-        # Calculate stats from existing data
-        U.obs.j <- U.obs[obs_in_j_idx, , drop = FALSE]
-        mu.j <- apply(U.obs.j, 2, mean)
-        # Centering for covariance calculation
-        U.centered <- t(t(U.obs.j) - mu.j)
-        Sigma.j <- (t(U.centered) %*% U.centered) / length(obs_in_j_idx)
-        # Sample missing U from the category distribution
-        U[c == j, ] <- mvtnorm::rmvnorm(sum(c == j), mu.j, Sigma.j)
-      } else {
-        # Fallback if no/one observation: Sample from standard normal
-        U[c == j, ] <- matrix(rnorm(sum(c == j) * d), ncol = d)
-      }
-    }
-    # Enforce observed values (anchoring)
-    U[u.obs.idx, ] <- U.obs
-    return(list(U0 = U, Tau0 = NULL, Tau.aug0 = NULL))
-    
+  # Validate type input
+  if (!(type %in% c("ordinal", "nominal"))) {
+    stop("Input Error: 'type' must be 'ordinal' or 'nominal'.")
+  }
+  
+  # Set seed if provided
+  if (!is.null(seed)) {
+    set.seed(seed)
+    params$seed <- NULL 
+  }
+  
+  # Dispatch to the specific initialization function
+  if (type == "ordinal") {
+    return(do.call(gibbs.init.ordinal, params))
   } else {
-    # --- ORDINAL INITIALIZATION (Section 5.1.2) ---
-    # Based on truncated normals and interval constraints (tau)
-    # Note: Assumes d=1 for ordinal case
-    U <- rep(0, n)
-    
-    if (length(u.obs.idx) > 0) {
-      # Initialize Knots (Tau) based on observed U boundaries
-      Tau.aug <- c(u.lb, rep(0, m - 1), u.ub)
-      for (j in 1:(m - 1)) {
-        # Knot j must be between max(U in class j) and min(U in class > j)
-        lower_limit <- max(c(Tau.aug[j], U.obs[c[u.obs.idx] <= j]))
-        upper_limit <- min(c(u.ub, U.obs[c[u.obs.idx] > j]))
-        
-        Tau.aug[j + 1] <- DrawTrunNormal(0, 1, lower_limit, upper_limit)
-      }
-      # Sample missing U within their respective category intervals [tau_j, tau_j+1]
-      U <- DrawTrunNormal(0, 1, Tau.aug[c], Tau.aug[c + 1])
-      # Enforce observed values
-      U[u.obs.idx] <- U.obs
-      Tau <- Tau.aug[2:m]
-    } else {
-      # If no U is observed, just sort random points as initial knots
-      Tau <- sort(rnorm(m - 1, (u.lb + u.ub) / 2, 1))
-      Tau.aug <- c(u.lb, Tau, u.ub)
-      U <- DrawTrunNormal(0, 1, Tau.aug[c], Tau.aug[c + 1])
-    }
-    # Return U as a matrix to maintain consistency with Nominal output
-    return(list(U0 = as.matrix(U), Tau0 = Tau, Tau.aug0 = Tau.aug))
+    return(do.call(gibbs.init.nominal, params))
   }
 }
+
+#' Generate Initial Values for Ordinal Latent Variables
+#' 
+#' @param n Number of samples.
+#' @param m Number of categories.
+#' @param c Vector of category labels (1, 2, ..., m).
+#' @param u.obs.idx Indices of the observed latent variables.
+#' @param U.obs Vector of observed latent variable values.
+#' @param u.lb Lower bound for latent variables (default -Inf).
+#' @param u.ub Upper bound for latent variables (default Inf).
+#' 
+#' @return A list containing U0 (initial U), Tau0 (initial thresholds), and Tau.aug0.
+gibbs.init.ordinal <- function (n, m, c, u.obs.idx, U.obs, u.lb = -Inf, u.ub = Inf) {
+  
+  # Initialize latent variable vector
+  U <- rep(0, n)
+  
+  if (length(u.obs.idx) > 0) {
+    # Case: Some latent variables are observed
+    Tau.aug <- c(u.lb, rep(0, m - 1), u.ub)
+    
+    # Randomly draw initial thresholds consistent with observed data bounds
+    for (j in 1:(m - 1)) {
+      lower <- max(Tau.aug[j], U.obs[c[u.obs.idx] <= j])
+      upper <- min(u.ub, U.obs[c[u.obs.idx] > j])
+      Tau.aug[j + 1] <- DrawTrunNormal(0, 1, lower, upper)
+    }
+    
+    # Generate initial U based on categories and thresholds
+    U <- DrawTrunNormal(0, 1, Tau.aug[c], Tau.aug[c + 1])
+    U[u.obs.idx] <- U.obs  # Fix the observed parts
+    Tau <- Tau.aug[2:m]
+    
+  } else {
+    # Case: No latent variables are observed
+    # Generate sorted random thresholds
+    Tau <- sort(rnorm(m - 1, u.lb, u.ub))
+    Tau.aug <- c(u.lb, Tau, u.ub)
+    U <- DrawTrunNormal(0, 1, Tau.aug[c], Tau.aug[c + 1])
+  }
+  
+  return(list(U0 = U, Tau0 = Tau, Tau.aug0 = Tau.aug))
+}
+
+#' Generate Initial Values for Nominal Latent Variables
+#' 
+#' @param n Number of samples.
+#' @param m Number of categories.
+#' @param c Vector of category labels (1, 2, ..., m).
+#' @param u.obs.idx Indices of the observed latent variable rows.
+#' @param U.obs Matrix of observed latent variable values.
+#' 
+#' @return A list containing U0 (initial matrix of latent variables).
+gibbs.init.nominal <- function (n, m, c, u.obs.idx, U.obs) {
+  
+  # Get dimensionality of latent space
+  d <- ncol(U.obs)
+  U <- matrix(0, n, d)
+  
+  # Fit a category-specific normal model based on observed U
+  for (j in 1:m) {
+    # Extract observed u belonging to category j
+    obs_in_j_idx <- (c[u.obs.idx] == j)
+    U.obs.j <- U.obs[obs_in_j_idx, , drop = FALSE]
+    
+    if (nrow(U.obs.j) > 1) {
+      # Compute empirical mean and covariance matrix for category j
+      mu.j <- apply(U.obs.j, 2, mean)
+      U.centered <- t(t(U.obs.j) - mu.j)
+      Sigma.j <- (t(U.centered) %*% U.centered) / sum(obs_in_j_idx)
+      
+      # Fill initial U for all samples in category j using this distribution
+      U[c == j, ] <- rmvnorm(sum(c == j), mu.j, Sigma.j)
+    } else {
+      # Fallback if no/one observation exists for category j
+      U[c == j, ] <- matrix(rnorm(sum(c == j) * d), ncol = d)
+    }
+  }
+  
+  # Ensure observed indices keep their true values
+  U[u.obs.idx, ] <- U.obs
+  
+  return(list(U0 = U))
+}
+
 ```
 
 
 ## Prediction
+```{r}
+#' Unified Oracle Predictor (Using True Parameters)
+#' 
+#' @param type String. Must be either "ordinal" or "nominal".
+#' @param params A list containing the true parameters and test data.
+#' @param seed Optional random seed for reproducibility.
+#' 
+#' @return A list containing histories of U*, y.predict, and f.predict.
+gibbs.oracle <- function(type, params, seed = NULL) {
+  
+  # Validate type input
+  if (!(type %in% c("ordinal", "nominal"))) {
+    stop("Input Error: 'type' must be 'ordinal' or 'nominal'.")
+  }
+  
+  # Set seed if provided
+  if (!is.null(seed)) {
+    set.seed(seed)
+    params$seed <- NULL 
+  }
+  
+  # Dispatch to the specific oracle function
+  if (type == "ordinal") {
+    return(do.call(gibbs.oracle.ordinal, params))
+  } else {
+    return(do.call(gibbs.oracle.nominal, params))
+  }
+}
+
+#' Oracle Predictor for Ordinal Models
+#' 
+#' @param X.star Matrix of new quantitative predictors (test points).
+#' @param c.star Vector of new ordinal categories.
+#' @param beta True coefficient vector for u ~ X.
+#' @param sigma.u2 True scalar variance for latent u.
+#' @param sigma.error2 True variance for response error.
+#' @param Tau True threshold vector.
+#' @param u.lb Lower bound for latent u.
+#' @param u.ub Upper bound for latent u.
+#' @param ResponseFunction Function to calculate f(x, u).
+#' @param code Design code passed to ResponseFunction.
+#' @param uniform Logical. If TRUE, design of u is uniform.
+#' @param n.mc Number of Monte Carlo samples.
+#' 
+#' @return A list containing U.star.hist, y.predict.hist, and f.predict.hist.
+gibbs.oracle.ordinal <- function (X.star, c.star, beta, sigma.u2, sigma.error2, 
+                                  Tau, u.lb, u.ub, ResponseFunction, code,
+                                  uniform = FALSE, n.mc = 1000) {
+  # Initialize
+  n.star <- length(c.star)
+  U.star.hist <- matrix(0, n.star, n.mc)
+  f.predict.hist <- matrix(0, n.star, n.mc)
+  y.predict.hist <- matrix(0, n.star, n.mc)
+  X.star.tilde <- cbind(1, X.star)
+  
+  for (idx in 1:n.mc) {
+    # 1. Draw U.star
+    Tau.aug <- c(u.lb, Tau, u.ub)
+    if (uniform) {
+      U.star <- runif(n.star, Tau.aug[c.star], Tau.aug[c.star+1])
+    } else {
+      U.star <- DrawTrunNormal(X.star.tilde %*% beta, rep(sqrt(sigma.u2), n.star), 
+                               Tau.aug[c.star], Tau.aug[c.star+1])
+    }
+    U.star.hist[, idx] <- U.star
+    
+    # 2. Draw f.star and y.star
+    f.predict.hist[, idx] <- ResponseFunction(X.star, as.matrix(U.star), code)
+    y.predict.hist[, idx] <- f.predict.hist[, idx] + rnorm(n.star, 0, sqrt(sigma.error2))
+  }
+  
+  return(list(U.star.hist = U.star.hist,
+              y.predict.hist = y.predict.hist, 
+              f.predict.hist = f.predict.hist))
+}
+
+#' Oracle Predictor for Nominal Models
+#' 
+#' @param X.star Matrix of new quantitative predictors (test points).
+#' @param c.star Vector of new nominal categories.
+#' @param beta True coefficient matrix (B.tilde) for u ~ X.
+#' @param sigma.u2 True covariance matrix (Sigma.u) for latent u.
+#' @param sigma.error2 True variance for response error.
+#' @param classifier A function returning the category c given u (the Error Mechanism).
+#' @param ResponseFunction Function to calculate f(x, u).
+#' @param code Design code passed to ResponseFunction.
+#' @param uniform Logical. If TRUE, design of u is uniform.
+#' @param u.lb,u.ub Bounds for uniform design.
+#' @param n.mc Number of Monte Carlo samples.
+#' 
+#' @return A list containing U.star.hist, y.predict.hist, and f.predict.hist.
+gibbs.oracle.nominal <- function (X.star, c.star, beta, sigma.u2, sigma.error2, 
+                                  classifier, ResponseFunction, code,
+                                  uniform = FALSE, u.lb = NULL, u.ub = NULL, n.mc = 1000) {
+  # Initialize
+  n.star <- length(c.star)
+  d <- ncol(sigma.u2)
+  U.star.hist <- matrix(0, n.star, d * n.mc)
+  f.predict.hist <- matrix(0, n.star, n.mc)
+  y.predict.hist <- matrix(0, n.star, n.mc)
+  
+  X.star.tilde <- cbind(1, X.star)
+  mean.u <- X.star.tilde %*% beta
+  Chol.u <- t(chol(sigma.u2))
+  
+  for (idx in 1:n.mc) {
+    U_current_mc <- matrix(0, n.star, d)
+    
+    # 1. Draw U* using Accept-Reject based on the classifier
+    for (i in 1:n.star) {
+      while (TRUE) {
+        if (!uniform) {
+          U.prime <- c(mean.u[i, ] + Chol.u %*% rnorm(d))
+        } else {
+          U.prime <- runif(d, u.lb, u.ub)
+        }
+        
+        # Check if the drawn U belongs to the observed category c.star
+        c.prime <- classifier(U.prime)$c
+        if (c.prime == c.star[i]) {
+          U_current_mc[i, ] <- U.prime
+          break
+        }
+      }
+    }
+    U.star.hist[, ((idx-1)*d+1):(idx*d)] <- U_current_mc
+    
+    # 2. Draw f.star and y.star based on accepted U*
+    f.predict.hist[, idx] <- ResponseFunction(X.star, U_current_mc, code)
+    y.predict.hist[, idx] <- f.predict.hist[, idx] + rnorm(n.star, 0, sqrt(sigma.error2))
+  }
+  
+  return(list(U.star.hist = U.star.hist,
+              y.predict.hist = y.predict.hist, 
+              f.predict.hist = f.predict.hist))
+}
+
+```
+
+## Ordinal Example
+
+### Data generation
+Set basic parameters for simulation.
+
+```{r}
+n <- 100  # sample size
+m <- 6  # number of classes
+d.x <- 1  # dimension of x
+
+# true parameters for the data-generating process
+sigma.error2.true <- 0.1^2
+beta.true <- c(pi, 0)
+sigma.u2.true <- (0.5*pi)^2
+```
+
+Generate other parameters and data.
+
+```{r}
+set.seed(1)
+code <- 'cos'  # code for the response function
+# generate x, u, c ----
+x.ub <- 2
+x.lb <- -2
+X <- (x.ub - x.lb)*maximinLHS(n, d.x) + x.lb 
+X.tilde <- cbind(1, X)
+u.lb <- 0
+u.ub <- 2*pi
+U <- matrix(DrawTrunNormal(X.tilde%*%beta.true, sqrt(sigma.u2.true), u.lb, u.ub), n, 1)
+#U <- matrix(X.tilde%*%beta.true+sqrt(sigma.u2.true)*rnorn(n), n, 1)
+Tau.true <- (1:(m-1))/m*(u.ub-u.lb) + u.lb
+c <- apply(U, 1, function(u) match(T, c(u-Tau.true,-Inf) <= 0))  
+# generate y ----
+f.true <- ResponseFunction(X, U, code)
+y <- f.true + sqrt(sigma.error2.true)*rnorm(n) 
+sd.y <- sd(y)
+y <- y/sd.y  # standardize the response
+# select observed u ----
+n.obs <- floor(10)  # total number
+n.obs.c <- rep(0, m)  # number for each class
+n.min <- 2
+for (i in 1:m) {
+  if (i < m) {
+    n.obs.c[i] <- max(floor(sum(c == i)/n*n.obs), n.min)
+  } else {
+    n.obs.c[i] <- max(n.obs - sum(n.obs.c[-m]), n.min)
+  }
+}
+u.obs.idx <- NULL
+for (i in 1:m) {
+  u.obs.idx <- c(u.obs.idx, sample(c(1:n)[c == i], n.obs.c[i], FALSE))
+}
+u.mis.idx <- c(1:n)[-u.obs.idx]
+U.obs <- U[u.obs.idx, ]
+n.obs <- sum(n.obs.c)
+```
+
+
+### Visualization
+
+```{r fig.cap = 'True response function', echo=FALSE}
+PlotResponse(code = code, nx = 100, lb.u = min(U), ub.u = max(U), lb.x = min(X), ub.x = max(X))
+```
+
+```{r}
+u_df <- data.frame(x = X, u = U, y = y*sd.y, class = as.character(c), observed = rep("FALSE", n))
+u_df$observed[u.obs.idx] <- "TRUE"
+```
+
+```{r fig.cap = 'Scatterplot of y vs. u', echo=FALSE}
+ggfig <- 
+ggplot(u_df, aes(x = u, color = class)) + 
+  geom_point(size = 3.5, aes(y = y)) + 
+  scale_color_viridis_d(name = "Class") + 
+  geom_function(fun = function(u) ResponseFunction(X=0, U=u, code=code), color = '#FF7F0E', linewidth = 1) +
+  geom_vline(xintercept = Tau.true, linewidth = 1) + 
+  coord_cartesian(xlim = c(min(U), max(U)), ylim = c(min(u_df$y), max(u_df$y))) +
+  labs(color = "Class", x = 'Latent u') + 
+  my_theme
+#ggsave(paste0(params$fig.dir, 'Scatter-y-vs-u.pdf'), plot = ggfig, width = 8, height = 6)
+
+ggfig <- 
+ggplot(u_df[u_df$observed=="TRUE",], aes(x = u, y = y, color = class)) +
+  geom_point(size = 3.5) +
+  scale_color_viridis_d(name = "Class") + 
+  geom_function(fun = function(u) ResponseFunction(X=0, U=u, code=code), color = '#FF7F0E', linewidth = 1) +
+  coord_cartesian(xlim = c(min(U), max(U)), ylim = c(min(u_df$y), max(u_df$y))) +
+  labs(color = "Class") + 
+  my_theme
+#ggsave(paste0(params$fig.dir, 'Scatter-y-vs-u-obs.pdf'), plot = ggfig, width = 8, height = 6)
+
+ggfig <- 
+ggplot(u_df, aes(x = c, y = y, color = class)) +
+  geom_point(size = 3.5) +
+  scale_color_viridis_d(name = "Class") + 
+  labs(color = "Class", x = 'Class') + 
+  my_theme
+#ggsave(paste0(params$fig.dir, 'Scatter-y-vs-c.pdf'), plot = ggfig, width = 8, height = 6)
+```
+
+```{r fig.cap = 'Scatterplot of u versus x', echo=FALSE}
+ggfig <- 
+  ggplot(u_df, aes(x = X, y = u, color = class, shape = observed)) +
+  geom_point(size = 3) +
+  scale_color_viridis_d(name = "Class") + 
+  geom_abline(slope = beta.true[2], intercept = beta.true[1], linewidth = 1, color = 'brown') +
+  labs(color = "Class", shape = 'Observation') + 
+  my_theme
+#ggsave(paste0(params$fig.dir, 'Scatter-u-vs-x.pdf'), plot = ggfig, width = 8, height = 6)
+```
+
+```{r fig.cap = 'Barplot of c', echo=FALSE}
+c_df <- data.frame(class = 1:m, value = rep(0,m))
+for (i in 1:m) {
+  c_df$value[i] <- sum(c == i)
+}
+bar_plot <- 
+  ggplot(c_df, aes(x = class, y = value, fill = as.character(class))) +
+  geom_bar(stat = "identity", color = "black", width = 0.7) +
+  scale_fill_viridis_d(name = "Class") +  
+  labs(x = "Class", y = "Count") +
+  my_theme 
+#ggsave(paste0(params$fig.dir, 'class-bar-plot.pdf'), plot = bar_plot, width = 8, height = 6)
+```
+
+```{r fig.cap = 'Scatterplot of y vs. x-c-u-obs', echo=FALSE}
+ggfig <- Plot.Data(c, X, y, U, u.obs.idx)
+ggsave(paste0(params$fig.dir, 'Scatter-y-x-c.pdf'), plot = ggfig[[1]], width = 8, height = 6)
+ggsave(paste0(params$fig.dir, 'Scatter-y-x-u-obs.pdf'), plot = ggfig[[2]], width = 8, height = 6)
+```
+
+### Hyperparameters Related
+
+fixed hyperparameter
+
+```{r, eval = FALSE}
+v0 <- 1
+g <- 1
+IG.a.u <- 1
+IG.b.u <- 1
+IG.a.error <- 2.5/2
+IG.b.error <- 2.5*0.084/2
+```
+
+Obtain GP hyperparameters by MLE
+
+Fit MLE for the GP hyperparameters using the limited observed data. We use package 'laGP' (see Gramacy's book).
+
+```{r}
+W <- cbind(X, U)
+gp <- newGPsep(W[u.obs.idx,], y[u.obs.idx], d = 0.1, g = 0.01, dK = TRUE)
+gp.mle <- mleGPsep(gp, param = "both", tmin = c(1e-3, 1e-3), tmax=c(1e3, 10^2))
+theta.mle.obs <- 1/gp.mle$theta[1:(d.x+1)]
+g.mle <- gp.mle$theta[length(gp.mle$theta)] 
+sigma2.mle <- (t(y[u.obs.idx])%*%solve(KernelMatrix(W[u.obs.idx,], c(theta.mle.obs, 1)) + g.mle*diag(n.obs))%*%y[u.obs.idx]/n.obs) |> drop()
+sigma.error2.mle.obs <- sigma2.mle*g.mle
+rho.mle.obs <- sqrt(1/g.mle)
+```
+
+```{r echo = FALSE}
+print(paste0('The MLE (from observed U) of lengthscale for x is ', theta.mle.obs[1:d.x]))
+print(paste0('The MLE (from observed U) of lengthscale for u is ', theta.mle.obs[d.x+1]))
+print(paste0('The MLE (from observed U) of nugget (variance) is ', sigma.error2.mle.obs))
+print(paste0('The MLE (from observed U) of SN ratio is ', rho.mle.obs))
+```
+
+```{r}
+# call the destructor function otherwise memory will leak.
+deleteGPsep(gp)
+```
+
+#### (Optional) For comparison, we can also obtain the MLE of GP hyperparameters using the complete data. 
+
+```{r, eval = FALSE}
+W <- cbind(X, U)
+gp <- newGPsep(W, y, d = 0.1, g = 0.01, dK = TRUE)
+gp.mle <- mleGPsep(gp, param = "both", tmin = c(1e-3, 1e-3), tmax=c(1e3, var(y)))
+theta.mle <- 1/gp.mle$theta[1:(d.x+1)]
+g.mle <- gp.mle$theta[length(gp.mle$theta)] 
+sigma2.mle <- (t(y)%*%solve(KernelMatrix(W, c(theta.mle, 1)) + g.mle*diag(n))%*%(y)/n) |> drop()
+sigma.error2.mle <- sigma2.mle*g.mle
+rho.mle <- sqrt(1/g.mle)
+rm(list=c('W','gp','gp.mle','g.mle','sigma2.mle'))
+```
+
+```{r echo = FALSE, eval = FALSE}
+print(paste0('The MLE of lengthscale for x is ', theta.mle[1:d.x]))
+print(paste0('The MLE of lengthscale for u is ', theta.mle[d.x+1]))
+print(paste0('The MLE of nugget (variance) is ', sigma.error2.mle))
+print(paste0('The MLE of SN ratio is ', rho.mle))
+```
+
+#### (Optional) Obtain GP hyperparameters by Empirical Bayes
+
+Alternatively, we can obtain GP hyperparameters by EB, which is much slower than the MLE approach using the observed $u$.
+
+Create candidates for GP hyperparameters (by grid).
+
+```{r, eval = FALSE}
+hyper.mat <- c() # each column of hyper.mat is a candidate of hyperparameter (theta,rho)
+for (i in exp(log(2)*c(-6:1))) { # length scale for x
+  for (j in exp(log(2)*c(-6:1))) { # lengthscale for u
+    for(l in exp(log(2)*c(2:5))) { # signal-to-noise rho
+      hyper.mat <- cbind(hyper.mat, c(rep(i, d.x), j, l))
+    }
+  }
+}
+rm(list=c('i','j','l'))
+```
+
+Generate Monte Carlo samples of $u$ given $\{x,c,u_\text{obs}\}$.
+
+```{r, eval = FALSE}
+n.mc.eb <- 10000
+sigma.u20 <- 1/rgamma(1, shape = IG.a.u, rate = IG.b.u)
+beta0 <- rep(0, d.x+1)
+Ini.par <- GetInitial(n, m, c, u.obs.idx, U.obs, u.lb, u.ub) 
+Tau0 <- Ini.par$Tau0
+U0 <- Ini.par$U0
+samples.eb <- Gibbs.EB(seed = 345, n.mc = n.mc.eb, 
+                       beta0 = beta0, sigma.u20 = sigma.u20, Tau0 = Tau0, U0 = U0, 
+                       X = X, c = c, u.obs.idx = u.obs.idx, U.obs = U.obs, u.lb = u.lb, u.ub = u.ub,
+                       v0 = v0, g = g, IG.a.u = IG.a.u, IG.b.u = IG.b.u)
+```
+
+Estimate the marginal likelihood (using parallel computing).
+
+```{r, eval = FALSE}
+cl <- parallel::makeCluster(8)
+doParallel::registerDoParallel(cl)
+eb.evidence <- foreach(i = 1:ncol(hyper.mat), .combine = 'cbind') %dopar% {
+  EstimateEvidence(theta = hyper.mat[1:(d.x+1), i], rho = hyper.mat[d.x+1+1, i],
+                   U.hist = samples.eb$U.hist,
+                   IG.a.error = IG.a.error, IG.b.error = IG.b.error,
+                   X = X, y = y)
+}
+parallel::stopCluster(cl)
+rm(cl)
+```
+
+Select the optimal one.
+
+```{r, eval = FALSE}
+skip <- 10
+eb.evidence.mean <- apply(eb.evidence[seq(1, nrow(eb.evidence), by = skip), ], 2, mean)
+eb.evidence.sd <- apply(eb.evidence[seq(1, nrow(eb.evidence), by = skip), ], 2, sd)
+theta.eb <- hyper.mat[1:(d.x+1), which.max(eb.evidence.mean)]
+rho.eb <- hyper.mat[d.x+1+1, which.max(eb.evidence.mean)]
+```
+
+Plot the Monte Carlo estimates of the marginal likelihood for each candidate. 
+
+```{r echo = FALSE, eval = FALSE}
+plot(log(eb.evidence.mean), 
+     ylab = 'Log Evidence', 
+     xlab = 'Hyper-parameter index')
+     #ylim = c(min(eb.evidence.mean - 2*eb.evidence.sd/sqrt(params$n.mc)), 
+     #         max(eb.evidence.mean + 2*eb.evidence.sd/sqrt(params$n.mc))))
+points(which.max(eb.evidence.mean), log(max(eb.evidence.mean)), col = 'blue', pch = 16)
+#segments(1:ncol(hyper.mat), eb.evidence.mean - 2*eb.evidence.sd/sqrt(params$n.mc),
+#         1:ncol(hyper.mat), eb.evidence.mean + 2*eb.evidence.sd/sqrt(params$n.mc))
+```
+
+```{r echo = FALSE, eval = FALSE}
+plot(eb.evidence.mean, 
+     ylab = 'Evidence', 
+     xlab = 'Hyper-para index',
+     ylim = c(min(eb.evidence.mean - 2*eb.evidence.sd/sqrt(n.mc.eb)), 
+              max(eb.evidence.mean + 2*eb.evidence.sd/sqrt(n.mc.eb))), pch = 16, cex = 0.5)
+segments(1:ncol(hyper.mat), eb.evidence.mean - 2*eb.evidence.sd/sqrt(n.mc.eb),
+         1:ncol(hyper.mat), eb.evidence.mean + 2*eb.evidence.sd/sqrt(n.mc.eb))
+points(which.max(eb.evidence.mean), max(eb.evidence.mean), col = 'blue', pch = 16)
+```
+
+### Bayesian Inference by Gibbs
+
+Initialize.
+
+```{r}
+set.seed(999)
+beta.hist <- matrix(rep(0, d.x+1), d.x+1, 1)
+sigma.u2.hist <- 1/rgamma(1, shape = IG.a.u, rate = IG.b.u)
+sigma.error2.hist <- 1/rgamma(1, shape = IG.a.error, rate = IG.b.error)
+Ini.par <- gibbs.init.ordinal(n, m, c, u.obs.idx, U.obs, u.lb, u.ub) 
+Tau.hist <- matrix(Ini.par$Tau0, m-1, 1)
+U.hist <- matrix(Ini.par$U0, n, 1)
+accep.hist <- NULL
+f.hist <- NULL
+
+K = 1000  # number of iteration for a grand cycle
+lmd <- 0.01  # step size, adjusted after each cycle 
+stepsize.hist <- data.frame(stepsize = lmd, k = 1)
+time0 <- proc.time()
+time.hist <- data.frame(user = double(), system = double(), elapsed = double())
+```
+
+Run the Gibbs sampler.
+
+```{r}
+for (cycles in 1:60) {
+  # Initialize the current cycle
+  beta0 <- beta.hist[, ncol(beta.hist)]
+  sigma.u20 <- sigma.u2.hist[length(sigma.u2.hist)]
+  sigma.error20 <- sigma.error2.hist[length(sigma.error2.hist)]
+  Tau0 <- Tau.hist[, ncol(Tau.hist)]
+  U0 <- U.hist[, ncol(U.hist)]
+  
+  # Run Gibbs for the current cycle 
+  Gibbs1 <- gibbs.ordinal(num.iter = K, lmd = lmd, 
+                  beta0 = beta0, sigma.u20 = sigma.u20, sigma.error20 = sigma.error20, Tau0 = Tau0, U0 = U0, 
+                  X = X, c = c, y = y, u.obs.idx = u.obs.idx, U.obs = U.obs, u.lb = u.lb, u.ub = u.ub,
+                  v0 = v0, g = g, IG.a.u = IG.a.u, IG.b.u = IG.b.u, IG.a.error = IG.a.error, IG.b.error = IG.b.error,
+                  theta = theta.mle.obs, rho = rho.mle.obs, simu.f = FALSE, design.map = FALSE) # theta = theta.eb, rho = rho.eb
+  
+  # save results
+  beta.hist <- cbind(beta.hist, Gibbs1$beta.hist)
+  sigma.u2.hist <- c(sigma.u2.hist, Gibbs1$sigma.u2.hist)
+  sigma.error2.hist <- c(sigma.error2.hist, Gibbs1$sigma.error2.hist)
+  Tau.hist <- cbind(Tau.hist, Gibbs1$Tau.hist)
+  U.hist <- cbind(U.hist, Gibbs1$U.hist)
+  accep.hist <- c(accep.hist, Gibbs1$accep)
+  f.hist <- cbind(f.hist, Gibbs1$f.hist)
+  
+  # adjust stepsize and record time
+  if (mean(Gibbs1$accep) <= 0.2) {
+    lmd <- lmd / 1.5
+    stepsize.hist[nrow(stepsize.hist) + 1, ] <- c(lmd, K*cycles+1)
+  }else if (mean(Gibbs1$accep) > 0.5){
+    lmd <- lmd * 1.5
+    stepsize.hist[nrow(stepsize.hist) + 1, ] <- c(lmd, K*cycles+1)
+  }
+  time.hist[cycles, ] <- c(proc.time() - time0)[1:3]
+}
+```
+
+### Save results 
+
+```{r}
+saveRDS(list(X = X, y = y, sd.y = sd.y, c = c, x.ub = x.ub, x.lb = x.lb,
+             v0 = v0, g = g, IG.a.u = IG.a.u, IG.b.u = IG.b.u, IG.a.error = IG.a.error, IG.b.error = IG.b.error, u.lb = u.lb, u.ub = u.ub,
+             theta.mle.obs = theta.mle.obs, rho.mle.obs = rho.mle.obs,
+             #theta.eb = theta.eb, rho.eb = rho.eb,
+             beta.hist = beta.hist, beta.true = beta.true,
+             sigma.u2.hist = sigma.u2.hist, sigma.u2.true = sigma.u2.true,
+             sigma.error2.hist = sigma.error2.hist, sigma.error2.true = sigma.error2.true,
+             Tau.hist = Tau.hist, Tau.true = Tau.true,
+             U.hist = U.hist, U.true = U, u.obs.idx = u.obs.idx, U.obs = U.obs,
+             f.hist = f.hist, f.true = f.true,
+             accep.hist = accep.hist, stepsize.hist = stepsize.hist, time.hist = time.hist), 
+        file = params$save.filename) 
+```
+
+Shutdown the computer.
+
+```{r echo = FALSE}
+# system('shutdown -s')
+```
