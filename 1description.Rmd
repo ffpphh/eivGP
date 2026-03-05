@@ -43,7 +43,19 @@ usethis::use_package("pgdraw", type = "depends")
 usethis::use_package("mvtnorm", type = "depends")
 usethis::use_package("LapacesDemon", type = "depends")
 usethis::use_package("GA", type = "depends")
+usethis::use_package("laGP", type = "depends")
+usethis::use_package("lhs", type = "depends")
+usethis::use_package("scatterplot3d", type = "depends")
+usethis::use_package("doParallel", type = "depends")
 usethis::use_pipe(export=TRUE)
+
+library(mvtnorm)
+library(laGP)
+library(lhs)
+library(GA)
+library(scatterplot3d)
+library(doParallel)
+library(ggplot2)
 ```
 
 <!--library("pgdraw") for simulating polya-Gamma-->
