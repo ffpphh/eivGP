@@ -161,7 +161,7 @@ EstimateEvidence <- function (theta, rho,
   return(mar.likelihood.hist)
 }  
 
-#'Predict y by kriging (given U.star). ##MAYBE PUT IN SIMULATION
+#'Predict y by kriging (given U.star).
 #'
 #' @param d: the dimension of u
 #' @param y: observed y
