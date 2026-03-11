@@ -1,3 +1,7 @@
+
+
+
+
 # Simulation
 
 Here we mainly have 4 steps.
@@ -8,269 +12,32 @@ Here we mainly have 4 steps.
 
 As we have finished step 1 and 3 before, here only initialization and prediction.
 
-## Initialization
-```{r}
-#' Unified Initialization for Latent Variables
-#' 
-#' @param type String. Must be either "ordinal" or "nominal".
-#' @param params A list containing the required parameters for initialization.
-#' @param seed Optional random seed to ensure reproducibility.
-#' 
-#' @return A list containing initial values (e.g., U0, Tau0).
-gibbs.init <- function(type, params, seed = NULL) {
-  
-  # Validate type input
-  if (!(type %in% c("ordinal", "nominal"))) {
-    stop("Input Error: 'type' must be 'ordinal' or 'nominal'.")
-  }
-  
-  # Set seed if provided
-  if (!is.null(seed)) {
-    set.seed(seed)
-    params$seed <- NULL 
-  }
-  
-  # Dispatch to the specific initialization function
-  if (type == "ordinal") {
-    return(do.call(gibbs.init.ordinal, params))
-  } else {
-    return(do.call(gibbs.init.nominal, params))
-  }
-}
-
-#' Generate Initial Values for Ordinal Latent Variables
-#' 
-#' @param n Number of samples.
-#' @param m Number of categories.
-#' @param c Vector of category labels (1, 2, ..., m).
-#' @param u.obs.idx Indices of the observed latent variables.
-#' @param U.obs Vector of observed latent variable values.
-#' @param u.lb Lower bound for latent variables (default -Inf).
-#' @param u.ub Upper bound for latent variables (default Inf).
-#' 
-#' @return A list containing U0 (initial U), Tau0 (initial thresholds), and Tau.aug0.
-gibbs.init.ordinal <- function (n, m, c, u.obs.idx, U.obs, u.lb = -Inf, u.ub = Inf) {
-  
-  # Initialize latent variable vector
-  U <- rep(0, n)
-  
-  if (length(u.obs.idx) > 0) {
-    # Case: Some latent variables are observed
-    Tau.aug <- c(u.lb, rep(0, m - 1), u.ub)
-    
-    # Randomly draw initial thresholds consistent with observed data bounds
-    for (j in 1:(m - 1)) {
-      lower <- max(Tau.aug[j], U.obs[c[u.obs.idx] <= j])
-      upper <- min(u.ub, U.obs[c[u.obs.idx] > j])
-      Tau.aug[j + 1] <- DrawTrunNormal(0, 1, lower, upper)
-    }
-    
-    # Generate initial U based on categories and thresholds
-    U <- DrawTrunNormal(0, 1, Tau.aug[c], Tau.aug[c + 1])
-    U[u.obs.idx] <- U.obs  # Fix the observed parts
-    Tau <- Tau.aug[2:m]
-    
-  } else {
-    # Case: No latent variables are observed
-    # Generate sorted random thresholds
-    Tau <- sort(rnorm(m - 1, u.lb, u.ub))
-    Tau.aug <- c(u.lb, Tau, u.ub)
-    U <- DrawTrunNormal(0, 1, Tau.aug[c], Tau.aug[c + 1])
-  }
-  
-  return(list(U0 = U, Tau0 = Tau, Tau.aug0 = Tau.aug))
-}
-
-#' Generate Initial Values for Nominal Latent Variables
-#' 
-#' @param n Number of samples.
-#' @param m Number of categories.
-#' @param c Vector of category labels (1, 2, ..., m).
-#' @param u.obs.idx Indices of the observed latent variable rows.
-#' @param U.obs Matrix of observed latent variable values.
-#' 
-#' @return A list containing U0 (initial matrix of latent variables).
-gibbs.init.nominal <- function (n, m, c, u.obs.idx, U.obs) {
-  
-  # Get dimensionality of latent space
-  d <- ncol(U.obs)
-  U <- matrix(0, n, d)
-  
-  # Fit a category-specific normal model based on observed U
-  for (j in 1:m) {
-    # Extract observed u belonging to category j
-    obs_in_j_idx <- (c[u.obs.idx] == j)
-    U.obs.j <- U.obs[obs_in_j_idx, , drop = FALSE]
-    
-    if (nrow(U.obs.j) > 1) {
-      # Compute empirical mean and covariance matrix for category j
-      mu.j <- apply(U.obs.j, 2, mean)
-      U.centered <- t(t(U.obs.j) - mu.j)
-      Sigma.j <- (t(U.centered) %*% U.centered) / sum(obs_in_j_idx)
-      
-      # Fill initial U for all samples in category j using this distribution
-      U[c == j, ] <- rmvnorm(sum(c == j), mu.j, Sigma.j)
-    } else {
-      # Fallback if no/one observation exists for category j
-      U[c == j, ] <- matrix(rnorm(sum(c == j) * d), ncol = d)
-    }
-  }
-  
-  # Ensure observed indices keep their true values
-  U[u.obs.idx, ] <- U.obs
-  
-  return(list(U0 = U))
-}
-
+```{r setup, include=FALSE}
+library(here)
+knitr::opts_knit$set(root.dir = here())
+knitr::opts_chunk$set(collapse = TRUE, message = FALSE, tidy = TRUE, tidy.opts = list(width.cutoff=60), fig.align = 'center', fig.width = 8, fig.height = 6)
 ```
 
 
-## Prediction
+
+
+
+## Ordinal Example Simulation
 ```{r}
-#' Unified Oracle Predictor (Using True Parameters)
-#' 
-#' @param type String. Must be either "ordinal" or "nominal".
-#' @param params A list containing the true parameters and test data.
-#' @param seed Optional random seed for reproducibility.
-#' 
-#' @return A list containing histories of U*, y.predict, and f.predict.
-gibbs.oracle <- function(type, params, seed = NULL) {
-  
-  # Validate type input
-  if (!(type %in% c("ordinal", "nominal"))) {
-    stop("Input Error: 'type' must be 'ordinal' or 'nominal'.")
-  }
-  
-  # Set seed if provided
-  if (!is.null(seed)) {
-    set.seed(seed)
-    params$seed <- NULL 
-  }
-  
-  # Dispatch to the specific oracle function
-  if (type == "ordinal") {
-    return(do.call(gibbs.oracle.ordinal, params))
-  } else {
-    return(do.call(gibbs.oracle.nominal, params))
-  }
-}
-
-#' Oracle Predictor for Ordinal Models
-#' 
-#' @param X.star Matrix of new quantitative predictors (test points).
-#' @param c.star Vector of new ordinal categories.
-#' @param beta True coefficient vector for u ~ X.
-#' @param sigma.u2 True scalar variance for latent u.
-#' @param sigma.error2 True variance for response error.
-#' @param Tau True threshold vector.
-#' @param u.lb Lower bound for latent u.
-#' @param u.ub Upper bound for latent u.
-#' @param ResponseFunction Function to calculate f(x, u).
-#' @param code Design code passed to ResponseFunction.
-#' @param uniform Logical. If TRUE, design of u is uniform.
-#' @param n.mc Number of Monte Carlo samples.
-#' 
-#' @return A list containing U.star.hist, y.predict.hist, and f.predict.hist.
-gibbs.oracle.ordinal <- function (X.star, c.star, beta, sigma.u2, sigma.error2, 
-                                  Tau, u.lb, u.ub, ResponseFunction, code,
-                                  uniform = FALSE, n.mc = 1000) {
-  # Initialize
-  n.star <- length(c.star)
-  U.star.hist <- matrix(0, n.star, n.mc)
-  f.predict.hist <- matrix(0, n.star, n.mc)
-  y.predict.hist <- matrix(0, n.star, n.mc)
-  X.star.tilde <- cbind(1, X.star)
-  
-  for (idx in 1:n.mc) {
-    # 1. Draw U.star
-    Tau.aug <- c(u.lb, Tau, u.ub)
-    if (uniform) {
-      U.star <- runif(n.star, Tau.aug[c.star], Tau.aug[c.star+1])
-    } else {
-      U.star <- DrawTrunNormal(X.star.tilde %*% beta, rep(sqrt(sigma.u2), n.star), 
-                               Tau.aug[c.star], Tau.aug[c.star+1])
-    }
-    U.star.hist[, idx] <- U.star
-    
-    # 2. Draw f.star and y.star
-    f.predict.hist[, idx] <- ResponseFunction(X.star, as.matrix(U.star), code)
-    y.predict.hist[, idx] <- f.predict.hist[, idx] + rnorm(n.star, 0, sqrt(sigma.error2))
-  }
-  
-  return(list(U.star.hist = U.star.hist,
-              y.predict.hist = y.predict.hist, 
-              f.predict.hist = f.predict.hist))
-}
-
-#' Oracle Predictor for Nominal Models
-#' 
-#' @param X.star Matrix of new quantitative predictors (test points).
-#' @param c.star Vector of new nominal categories.
-#' @param beta True coefficient matrix (B.tilde) for u ~ X.
-#' @param sigma.u2 True covariance matrix (Sigma.u) for latent u.
-#' @param sigma.error2 True variance for response error.
-#' @param classifier A function returning the category c given u (the Error Mechanism).
-#' @param ResponseFunction Function to calculate f(x, u).
-#' @param code Design code passed to ResponseFunction.
-#' @param uniform Logical. If TRUE, design of u is uniform.
-#' @param u.lb,u.ub Bounds for uniform design.
-#' @param n.mc Number of Monte Carlo samples.
-#' 
-#' @return A list containing U.star.hist, y.predict.hist, and f.predict.hist.
-gibbs.oracle.nominal <- function (X.star, c.star, beta, sigma.u2, sigma.error2, 
-                                  classifier, ResponseFunction, code,
-                                  uniform = FALSE, u.lb = NULL, u.ub = NULL, n.mc = 1000) {
-  # Initialize
-  n.star <- length(c.star)
-  d <- ncol(sigma.u2)
-  U.star.hist <- matrix(0, n.star, d * n.mc)
-  f.predict.hist <- matrix(0, n.star, n.mc)
-  y.predict.hist <- matrix(0, n.star, n.mc)
-  
-  X.star.tilde <- cbind(1, X.star)
-  mean.u <- X.star.tilde %*% beta
-  Chol.u <- t(chol(sigma.u2))
-  
-  for (idx in 1:n.mc) {
-    U_current_mc <- matrix(0, n.star, d)
-    
-    # 1. Draw U* using Accept-Reject based on the classifier
-    for (i in 1:n.star) {
-      while (TRUE) {
-        if (!uniform) {
-          U.prime <- c(mean.u[i, ] + Chol.u %*% rnorm(d))
-        } else {
-          U.prime <- runif(d, u.lb, u.ub)
-        }
-        
-        # Check if the drawn U belongs to the observed category c.star
-        c.prime <- classifier(U.prime)$c
-        if (c.prime == c.star[i]) {
-          U_current_mc[i, ] <- U.prime
-          break
-        }
-      }
-    }
-    U.star.hist[, ((idx-1)*d+1):(idx*d)] <- U_current_mc
-    
-    # 2. Draw f.star and y.star based on accepted U*
-    f.predict.hist[, idx] <- ResponseFunction(X.star, U_current_mc, code)
-    y.predict.hist[, idx] <- f.predict.hist[, idx] + rnorm(n.star, 0, sqrt(sigma.error2))
-  }
-  
-  return(list(U.star.hist = U.star.hist,
-              y.predict.hist = y.predict.hist, 
-              f.predict.hist = f.predict.hist))
-}
-
+library(mvtnorm)
+library(laGP)
+library(lhs)
+library(GA)
+library(scatterplot3d)
+library(doParallel)
+library(ggplot2)
 ```
-
+### Data Genetration 
+```{r}
 ## Ordinal Example
 
 ### Data generation
-Set basic parameters for simulation.
-
-```{r}
+# Set basic parameters for simulation.
 n <- 100  # sample size
 m <- 6  # number of classes
 d.x <- 1  # dimension of x
@@ -279,13 +46,11 @@ d.x <- 1  # dimension of x
 sigma.error2.true <- 0.1^2
 beta.true <- c(pi, 0)
 sigma.u2.true <- (0.5*pi)^2
-```
 
-Generate other parameters and data.
-
-```{r}
+# Generate other parameters and data.
 set.seed(1)
 code <- 'cos'  # code for the response function
+
 # generate x, u, c ----
 x.ub <- 2
 x.lb <- -2
@@ -294,14 +59,15 @@ X.tilde <- cbind(1, X)
 u.lb <- 0
 u.ub <- 2*pi
 U <- matrix(DrawTrunNormal(X.tilde%*%beta.true, sqrt(sigma.u2.true), u.lb, u.ub), n, 1)
-#U <- matrix(X.tilde%*%beta.true+sqrt(sigma.u2.true)*rnorn(n), n, 1)
 Tau.true <- (1:(m-1))/m*(u.ub-u.lb) + u.lb
-c <- apply(U, 1, function(u) match(T, c(u-Tau.true,-Inf) <= 0))  
+c <- apply(U, 1, function(u) match(TRUE, c(u-Tau.true,-Inf) <= 0))  
+
 # generate y ----
 f.true <- ResponseFunction(X, U, code)
 y <- f.true + sqrt(sigma.error2.true)*rnorm(n) 
 sd.y <- sd(y)
 y <- y/sd.y  # standardize the response
+
 # select observed u ----
 n.obs <- floor(10)  # total number
 n.obs.c <- rep(0, m)  # number for each class
@@ -318,12 +84,45 @@ for (i in 1:m) {
   u.obs.idx <- c(u.obs.idx, sample(c(1:n)[c == i], n.obs.c[i], FALSE))
 }
 u.mis.idx <- c(1:n)[-u.obs.idx]
-U.obs <- U[u.obs.idx, ]
+U.obs <- U[u.obs.idx, , drop = FALSE]
 n.obs <- sum(n.obs.c)
+
+
+Gibbs.data <- list(
+  X = X,
+  c = c,
+  y = y,
+  u.obs.idx = u.obs.idx,
+  U.obs = U.obs,
+  u.lb = u.lb,
+  u.ub = u.ub,
+  code = code,
+  m = m,
+  n = n
+)
+
+
+Gibbs.param.True <- list(
+  beta = beta.true,
+  sigma.u2 = sigma.u2.true,
+  sigma.error2 = sigma.error2.true, 
+  Tau = Tau.true
+)
+
 ```
 
-
 ### Visualization
+
+```{r}
+# Define the base directory for saving figures
+fig.dir <- "C:/Users/Lenovo/Desktop/eivGP/xuyi-local/output/figures/"
+
+# Create the directory if it doesn't already exist
+if (!dir.exists(fig_dir)) {
+  dir.create(fig_dir, recursive = TRUE)
+}
+
+```
 
 ```{r fig.cap = 'True response function', echo=FALSE}
 PlotResponse(code = code, nx = 100, lb.u = min(U), ub.u = max(U), lb.x = min(X), ub.x = max(X))
@@ -392,8 +191,8 @@ bar_plot <-
 
 ```{r fig.cap = 'Scatterplot of y vs. x-c-u-obs', echo=FALSE}
 ggfig <- Plot.Data(c, X, y, U, u.obs.idx)
-ggsave(paste0(params$fig.dir, 'Scatter-y-x-c.pdf'), plot = ggfig[[1]], width = 8, height = 6)
-ggsave(paste0(params$fig.dir, 'Scatter-y-x-u-obs.pdf'), plot = ggfig[[2]], width = 8, height = 6)
+ggsave(paste0(fig.dir, 'Scatter-y-x-c.pdf'), plot = ggfig[[1]], width = 8, height = 6)
+ggsave(paste0(fig.dir, 'Scatter-y-x-u-obs.pdf'), plot = ggfig[[2]], width = 8, height = 6)
 ```
 
 ### Hyperparameters Related
@@ -429,6 +228,22 @@ print(paste0('The MLE (from observed U) of lengthscale for x is ', theta.mle.obs
 print(paste0('The MLE (from observed U) of lengthscale for u is ', theta.mle.obs[d.x+1]))
 print(paste0('The MLE (from observed U) of nugget (variance) is ', sigma.error2.mle.obs))
 print(paste0('The MLE (from observed U) of SN ratio is ', rho.mle.obs))
+
+
+# GP.param: Stores the GP hyperparameters derived from MLE
+GP.param <- list(
+  theta = theta.mle.obs,
+  rho = rho.mle.obs
+)
+
+# Gibbs.hyper: Stores the hyperparameter priors for the Gibbs sampler
+# Assuming weakly informative defaults for the Ordinal Model (as derived in the model structure)
+Gibbs.hyper <- list(
+  v0 = 100,        # Prior variance on intercept beta0
+  g  = 100,        # Zellner's g-prior scaling factor on beta
+  IG.a.u = 2.01,   # Inverse Gamma shape parameter for sigma.u2
+  IG.b.u = 1.01    # Inverse Gamma rate parameter for sigma.u2
+)
 ```
 
 ```{r}
@@ -436,7 +251,7 @@ print(paste0('The MLE (from observed U) of SN ratio is ', rho.mle.obs))
 deleteGPsep(gp)
 ```
 
-#### (Optional) For comparison, we can also obtain the MLE of GP hyperparameters using the complete data. 
+### (Optional) For comparison, we can also obtain the MLE of GP hyperparameters using the complete data. 
 
 ```{r, eval = FALSE}
 W <- cbind(X, U)
@@ -457,7 +272,7 @@ print(paste0('The MLE of nugget (variance) is ', sigma.error2.mle))
 print(paste0('The MLE of SN ratio is ', rho.mle))
 ```
 
-#### (Optional) Obtain GP hyperparameters by Empirical Bayes
+### (Optional) Obtain GP hyperparameters by Empirical Bayes
 
 Alternatively, we can obtain GP hyperparameters by EB, which is much slower than the MLE approach using the observed $u$.
 
@@ -478,16 +293,30 @@ rm(list=c('i','j','l'))
 Generate Monte Carlo samples of $u$ given $\{x,c,u_\text{obs}\}$.
 
 ```{r, eval = FALSE}
-n.mc.eb <- 10000
+Gibbs.other.eb <- list(
+  seed = 345,
+  n.mc = 10000 
+)
+
+
 sigma.u20 <- 1/rgamma(1, shape = IG.a.u, rate = IG.b.u)
 beta0 <- rep(0, d.x+1)
-Ini.par <- GetInitial(n, m, c, u.obs.idx, U.obs, u.lb, u.ub) 
-Tau0 <- Ini.par$Tau0
-U0 <- Ini.par$U0
-samples.eb <- Gibbs.EB(seed = 345, n.mc = n.mc.eb, 
-                       beta0 = beta0, sigma.u20 = sigma.u20, Tau0 = Tau0, U0 = U0, 
-                       X = X, c = c, u.obs.idx = u.obs.idx, U.obs = U.obs, u.lb = u.lb, u.ub = u.ub,
-                       v0 = v0, g = g, IG.a.u = IG.a.u, IG.b.u = IG.b.u)
+Ini.par <- get.initial("ordinal", Gibbs.data, Gibbs.other.eb) 
+
+Gibbs.param.initial.eb <- list(
+  beta0 = beta0,
+  sigma.u20 = sigma.u20,
+  Tau0 = Ini.par$Tau0,   
+  U0 = Ini.par$U0 
+)
+
+samples.eb <- Gibbs.EB.ordinal(
+  Gibbs.data = Gibbs.data, 
+  Gibbs.param = Gibbs.param.initial.eb,
+  Gibbs.hyper = Gibbs.hyper,
+  Gibbs.other = Gibbs.other.eb
+)
+
 ```
 
 Estimate the marginal likelihood (using parallel computing).

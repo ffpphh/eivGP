@@ -1,4 +1,4 @@
-# Data Generation
+  # Data Generation
 
 ## Nominal case
 You can find the main process in Section 5.2 of the paper. Below Function including:
