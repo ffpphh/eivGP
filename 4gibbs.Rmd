@@ -85,6 +85,8 @@ Gibbs.ordinal <- function (Gibbs.param, Gibbs.data, Gibbs.hyper, GP.param, Gibbs
   if (n.obs > 0) U[u.obs.idx] <- U.obs
   
   Theta <- c(theta, rho^2 * sigma.error2)
+  #print(ncol(cbind(X,U))+1)
+  #print(length(Theta))
   KWW <- KernelMatrix(cbind(X, U), Theta); C <- KWW + sigma.error2 * diag(n)
   C.chol <- t(chol(C)); r <- backsolve(t(C.chol), forwardsolve(C.chol, y))
   

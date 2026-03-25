@@ -120,31 +120,25 @@ EstimateEvidence <- function (theta, rho,
 #' 
 #' @param input.type String. "ordinal" or "nominal".
 #' @param Gibbs.data List containing data parameters (n, m, c, U.obs, u.obs.idx, etc.).
-#' @param Gibbs.other List containing other configurations (e.g., seed).
 #' 
 #' @return A list of initial values (e.g., U0, Tau0).
 #' @export
-get.initial <- function(input.type, Gibbs.data, Gibbs.other = list()) {
+get.initial <- function(input.type, Gibbs.data = list()) {
   
   if (!(input.type %in% c("ordinal", "nominal"))) {
     stop("Input Error: 'input.type' must be 'ordinal' or 'nominal'.")
   }
   
-  # Set random seed if provided
-  if (!is.null(Gibbs.other$seed)) {
-    set.seed(Gibbs.other$seed)
-  }
-  
   if (input.type == "ordinal") {
-    return(get.initial.ordinal(Gibbs.data, Gibbs.other))
+    return(get.initial.ordinal(Gibbs.data))
   } else {
-    return(get.initial.nominal(Gibbs.data, Gibbs.other))
+    return(get.initial.nominal(Gibbs.data))
   }
 }
 
 
 #' Generate initial values for Ordinal Models
-get.initial.ordinal <- function(Gibbs.data, Gibbs.other) {
+get.initial.ordinal <- function(Gibbs.data) {
   
   # Unpack Inputs
   n <- Gibbs.data$n           # or length(Gibbs.data$c)
@@ -186,7 +180,7 @@ get.initial.ordinal <- function(Gibbs.data, Gibbs.other) {
 
 
 #' Generate initial values for Nominal Models
-get.initial.nominal <- function(Gibbs.data, Gibbs.other) {
+get.initial.nominal <- function(Gibbs.data) {
   
   # Unpack Inputs
   n <- Gibbs.data$n

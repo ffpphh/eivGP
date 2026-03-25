@@ -118,8 +118,8 @@ Gibbs.param.True <- list(
 fig.dir <- "C:/Users/Lenovo/Desktop/eivGP/xuyi-local/output/figures/"
 
 # Create the directory if it doesn't already exist
-if (!dir.exists(fig_dir)) {
-  dir.create(fig_dir, recursive = TRUE)
+if (!dir.exists(fig.dir)) {
+  dir.create(fig.dir, recursive = TRUE)
 }
 
 ```
@@ -301,7 +301,7 @@ Gibbs.other.eb <- list(
 
 sigma.u20 <- 1/rgamma(1, shape = IG.a.u, rate = IG.b.u)
 beta0 <- rep(0, d.x+1)
-Ini.par <- get.initial("ordinal", Gibbs.data, Gibbs.other.eb) 
+Ini.par <- get.initial("ordinal", Gibbs.data) 
 
 Gibbs.param.initial.eb <- list(
   beta0 = beta0,
@@ -377,7 +377,7 @@ set.seed(999)
 beta.hist <- matrix(rep(0, d.x+1), d.x+1, 1)
 sigma.u2.hist <- 1/rgamma(1, shape = IG.a.u, rate = IG.b.u)
 sigma.error2.hist <- 1/rgamma(1, shape = IG.a.error, rate = IG.b.error)
-Ini.par <- gibbs.init.ordinal(n, m, c, u.obs.idx, U.obs, u.lb, u.ub) 
+Ini.par <- get.initial.ordinal(Gibbs.data) 
 Tau.hist <- matrix(Ini.par$Tau0, m-1, 1)
 U.hist <- matrix(Ini.par$U0, n, 1)
 accep.hist <- NULL
@@ -388,25 +388,46 @@ lmd <- 0.01  # step size, adjusted after each cycle
 stepsize.hist <- data.frame(stepsize = lmd, k = 1)
 time0 <- proc.time()
 time.hist <- data.frame(user = double(), system = double(), elapsed = double())
+
+
+Gibbs.other <- list(
+    seed = NULL, 
+    num.iter = K, 
+    lmd = lmd,
+    simu.f = FALSE, 
+    design.map = FALSE
+  )
 ```
 
 Run the Gibbs sampler.
 
 ```{r}
 for (cycles in 1:60) {
+  print(cycles)
   # Initialize the current cycle
-  beta0 <- beta.hist[, ncol(beta.hist)]
-  sigma.u20 <- sigma.u2.hist[length(sigma.u2.hist)]
-  sigma.error20 <- sigma.error2.hist[length(sigma.error2.hist)]
-  Tau0 <- Tau.hist[, ncol(Tau.hist)]
-  U0 <- U.hist[, ncol(U.hist)]
+  curr_beta         <- as.vector(beta.hist[, ncol(beta.hist)])
+  curr_sigma.u2     <- as.numeric(sigma.u2.hist[length(sigma.u2.hist)])
+  curr_sigma.error2 <- as.numeric(sigma.error2.hist[length(sigma.error2.hist)])
+  curr_Tau          <- as.vector(Tau.hist[, ncol(Tau.hist)])
+  curr_U            <- as.vector(U.hist[, ncol(U.hist)])
+  
+  Gibbs.param_input <- list(
+    beta0         = curr_beta,
+    sigma.u20     = curr_sigma.u2,
+    sigma.error20 = curr_sigma.error2,
+    Tau0          = curr_Tau,
+    U0            = curr_U
+  )
   
   # Run Gibbs for the current cycle 
-  Gibbs1 <- gibbs.ordinal(num.iter = K, lmd = lmd, 
-                  beta0 = beta0, sigma.u20 = sigma.u20, sigma.error20 = sigma.error20, Tau0 = Tau0, U0 = U0, 
-                  X = X, c = c, y = y, u.obs.idx = u.obs.idx, U.obs = U.obs, u.lb = u.lb, u.ub = u.ub,
-                  v0 = v0, g = g, IG.a.u = IG.a.u, IG.b.u = IG.b.u, IG.a.error = IG.a.error, IG.b.error = IG.b.error,
-                  theta = theta.mle.obs, rho = rho.mle.obs, simu.f = FALSE, design.map = FALSE) # theta = theta.eb, rho = rho.eb
+  
+  Gibbs1 <- Gibbs.ordinal(
+    Gibbs.data = Gibbs.data,
+    Gibbs.param = Gibbs.param.initial,
+    Gibbs.hyper = Gibbs.hyper,
+    GP.param = GP.param,  
+    Gibbs.other = Gibbs.other
+  )
   
   # save results
   beta.hist <- cbind(beta.hist, Gibbs1$beta.hist)
