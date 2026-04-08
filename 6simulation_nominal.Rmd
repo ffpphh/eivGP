@@ -25,6 +25,7 @@ library(doParallel)
 library(ggplot2)
 library(gridExtra)
 library(metR)
+#library(eivGP)
 ##
 #source(paste0(params$main.dir, 'basics-common.R'))
 #source(paste0(params$main.dir, 'basics-nominal.R'))

@@ -7,7 +7,7 @@ Gibbs for posterior inference
 #' Unified Gibbs Sampler for EIV-GP Inference
 #' 
 #' @param input.type String. "ordinal" or "nominal".
-#' @param Gibbs.param List of initial parameter values.
+#' @param Gibbs.param List of initial parameter values. 
 #' @param Gibbs.data List of data inputs.
 #' @param Gibbs.hyper List of hyperparameters.
 #' @param GP.param List of GP parameters (theta, rho).
@@ -296,8 +296,6 @@ Gibbs.EB.ordinal <- function (Gibbs.param, Gibbs.data, Gibbs.hyper, Gibbs.other)
   c <- Gibbs.data$c
   u.obs.idx <- Gibbs.data$u.obs.idx
   U.obs <- Gibbs.data$U.obs
-  u.lb <- if(!is.null(Gibbs.data$u.lb)) Gibbs.data$u.lb else -Inf
-  u.ub <- if(!is.null(Gibbs.data$u.ub)) Gibbs.data$u.ub else Inf
   
   # Gibbs.hyper
   v0 <- Gibbs.hyper$v0
@@ -394,6 +392,7 @@ Gibbs.EB.nominal <- function (Gibbs.param, Gibbs.data, Gibbs.hyper, Gibbs.other)
   Q0.gamma <- diag(c(q0, rep(q.gamma, d)))
   
   B.tilde <- B.tilde0; Sigma.u <- Sigma.u0; gamma.mat <- gamma.mat0; U <- U0
+  #browser()
   if (length(u.obs.idx) > 0) U[u.obs.idx, ] <- U.obs
   omega.mat <- matrix(0, n, m.categories-1)
   
@@ -504,36 +503,28 @@ impute.u.ordinal <- function(Gibbs.data, Gibbs.hist, Gibbs.other) {
   Tau.hist <- Gibbs.hist$Tau.hist
   
   # Gibbs.other
-  n.mc <- Gibbs.other$n.mc
+  seed <- if(!is.null(Gibbs.other$seed)) Gibbs.other$seed else 222
   
-  # 2. Compute Constants
-  n.star <- length(c.star)
+  # Constants ----
+  n.mc <- ncol(Tau.hist)  # number of repeated samples to draw
+  n.star <- length(c.star)  # number of new samples
   X.star.tilde <- cbind(1, X.star)
-  total.iter <- length(sigma.u2.hist)
   
-  # Ensure n.mc doesn't exceed available history
-  n.mc <- min(n.mc, total.iter)
   
-  # Allocate storage
+  # Empty matrices ----
   U.star.hist <- matrix(0, nrow = n.star, ncol = n.mc)
   
-  # 3. Imputation Loop (Iterate through the Posterior History)
-  # We use the back-end of the chain assuming it has converged
-  iter.indices <- (total.iter - n.mc + 1):total.iter
-  
+  # Sampler ----
   for (idx in 1:n.mc) {
-    k <- iter.indices[idx]
+    # extract beta, sigma.u2, Tau ----
+    beta <- beta.hist[, idx]
+    sigma.u2 <- sigma.u2.hist[idx]
+    Tau <- Tau.hist[, idx]
+    Tau.aug <- c(u.lb, Tau, u.ub)
     
-    # Extract parameters for iteration k
-    beta.k <- beta.hist[, k]
-    sigma.u2.k <- sigma.u2.hist[k]
-    Tau.k <- Tau.hist[, k]
-    Tau.aug <- c(u.lb, Tau.k, u.ub)
-    
-    # Draw U.star from Truncated Normal
-    U.star.hist[, idx] <- DrawTrunNormal(X.star.tilde %*% beta.k, 
-                                         rep(sqrt(sigma.u2.k), n.star), 
-                                         Tau.aug[c.star], Tau.aug[c.star+1])
+    # draw U.star ----
+    U.star <- DrawTrunNormal(X.star.tilde%*%beta, rep(sqrt(sigma.u2), n.star), Tau.aug[c.star], Tau.aug[c.star+1])
+    U.star.hist[, idx] <- U.star
   }
   
   return(list(U.star.hist = U.star.hist))
@@ -550,10 +541,9 @@ impute.u.nominal <- function(Gibbs.data, Gibbs.hist, Gibbs.other) {
   # 1. Unpack Inputs
   
   # Gibbs.data
-  X.star <- Gibbs.data$X.star
-  c.star <- Gibbs.data$c.star
-  m.categories <- Gibbs.data$m
-  
+  X <- Gibbs.data$X
+  c <- Gibbs.data$c
+  U0 <- Gibbs.data$U0
   # Gibbs.hist
   B.tilde.hist <- Gibbs.hist$B.tilde.hist
   Sigma.u.hist <- Gibbs.hist$Sigma.u.hist
@@ -561,69 +551,57 @@ impute.u.nominal <- function(Gibbs.data, Gibbs.hist, Gibbs.other) {
   
   # Gibbs.other
   n.mc <- Gibbs.other$n.mc
+  seed <-  if(!is.null(Gibbs.other$seed)) Gibbs.data$seed else 222
   
-  # 2. Compute Constants
-  n.star <- length(c.star)
-  X.star.tilde <- cbind(1, X.star)
-  d <- nrow(Sigma.u.hist)
-  total.iter <- ncol(Sigma.u.hist) / d
+  #Constant
+  n <- length(c)
+  m <- nrow(gamma.mat.hist) + 1
+  d <- ncol(U0)
+  n.mc <- ncol(Sigma.u.hist)/d   
+  ##
+  bin.encoding <- BinaryEncode(c, m)
+  N.mat <- bin.encoding$N.mat
+  kappa.mat <- bin.encoding$kappa.mat
+  ##
+  X.tilde <- cbind(1, X)
   
-  n.mc <- min(n.mc, total.iter)
-  iter.indices <- (total.iter - n.mc + 1):total.iter
+  # Create empty matrices ----
+  U.hist <- matrix(0, n, d*n.mc)
   
-  # Allocate storage
-  U.star.hist <- matrix(0, nrow = n.star, ncol = d * n.mc)
-  cnt <- matrix(0, nrow = n.star, ncol = n.mc) # To record rejection steps
-  
-  # Helper function to classify based on current gamma.mat
-  # Simulates the stick-breaking generative process
-  predict.class.nominal <- function(u.vec, gamma.mat, m) {
-    u.tilde <- c(1, u.vec)
-    for (j in 1:(m-1)) {
-      psi <- sum(u.tilde * gamma.mat[j, ])
-      prob <- exp(psi) / (1 + exp(psi))
-      if (runif(1) < prob) return(j)
-    }
-    return(m)
-  }
-  
-  # 3. Imputation Loop (Accept-Reject based on MCMC target parameters)
+  # Sampler ----
   for (idx in 1:n.mc) {
-    k <- iter.indices[idx]
+    # initialize ----
+    U <- U0
+    omega.mat <- matrix(0, n, m-1)  # initialize with 0
     
-    # Extract parameters for iteration k
-    Sigma.u.k <- Sigma.u.hist[, ((k-1)*d+1):(k*d)]
-    B.tilde.k <- B.tilde.hist[, ((k-1)*d+1):(k*d)]
-    gamma.mat.k <- gamma.mat.hist[, ((k-1)*(d+1)+1):(k*(d+1))]
+    # extract {B.tilde, Sigma.u, gamma.mat} ----
+    B.tilde <- B.tilde.hist[, ((idx-1)*d+1):(idx*d)]
+    Sigma.u <- Sigma.u.hist[, ((idx-1)*d+1):(idx*d)]
+    Sigma.u.inv <- solve(Sigma.u)
+    gamma.mat <- gamma.mat.hist[, ((idx-1)*(d+1)+1):(idx*(d+1))]
     
-    mean.u.k <- X.star.tilde %*% B.tilde.k
-    Chol.u.k <- t(chol(Sigma.u.k))
-    
-    U.current <- matrix(0, n.star, d)
-    
-    for (i in 1:n.star) {
-      trials <- 0
-      while (TRUE) {
-        trials <- trials + 1
-        
-        # Propose U from the Gaussian prior
-        U.prime <- c(mean.u.k[i, ] + Chol.u.k %*% rnorm(d))
-        
-        # Check against the choice mechanism defined by gamma.mat
-        c.prime <- predict.class.nominal(U.prime, gamma.mat.k, m.categories)
-        
-        if (c.prime == c.star[i]) {
-          U.current[i, ] <- U.prime
-          break
-        }
+    # inner-loop Gibbs ----
+    for (k.iter in 1:num.iter) {
+      # draw omega
+      U.tilde <- cbind(1, U)
+      psi.mat <- U.tilde%*%t(gamma.mat)
+      omega.mat[N.mat == 1] <- pgdraw(1, psi.mat[N.mat == 1])  # only update those with N_{ij}=1, others remain as the initial 0.
+      
+      # draw U
+      for (i in 1:n) {
+        Qn.u <-  Sigma.u.inv + t(gamma.mat[,-1])%*%diag(omega.mat[i,])%*%gamma.mat[,-1]
+        Qn.u.inv <- solve(Qn.u)
+        mn.u <- Qn.u.inv%*%(Sigma.u.inv%*%t(B.tilde)%*%X.tilde[i,] + t(gamma.mat[,-1])%*%(kappa.mat[i,] - omega.mat[i,]*gamma.mat[,1]))
+        U[i, ] <- rmvnorm(1, mn.u, Qn.u.inv)
       }
-      cnt[i, idx] <- trials
     }
     
-    U.star.hist[, ((idx-1)*d+1):(idx*d)] <- U.current
+    # save the latest U ----
+    U.hist[, ((idx-1)*d+1):(idx*d)] <- U
   }
   
-  return(list(U.star.hist = U.star.hist, cnt = cnt))
+  # Return ----
+  return(U.hist)
 }
 
 ```
@@ -631,101 +609,79 @@ impute.u.nominal <- function(Gibbs.data, Gibbs.hist, Gibbs.other) {
 
 ### impute y
 
+for both cases
 ```{r}
-#' Predict y and f by Kriging (given imputed U.star)
-#' 
-#' @param Gibbs.data List containing observed and test data (X, y, X.star).
-#' @param Gibbs.hist List containing MCMC histories from model fitting and U imputation 
-#'        (sigma.error2.hist, U.hist, U.star.hist).
-#' @param GP.param List of GP parameters (theta, rho).
-#' @param Gibbs.other List of other settings (d, n.mc, single.ustar, separate, seed).
-#' 
-#' @return A list containing f.predict.hist and y.predict.hist.
-#' @export
-impute.y <- function(Gibbs.data, Gibbs.hist, GP.param, Gibbs.other) {
+impute.y <- function (Gibbs.data, Gibbs.hist, GP.param, Gibbs.other) {
+  # Predict y by kriging (given U.star).
+  # single.ustar: whether the goal is to predict at a fixed u.star.
   
-  # 1. Unpack Inputs ----
-  
-  # Gibbs.data
-  X <- Gibbs.data$X
+  d <- Gibbs.data$d
   y <- Gibbs.data$y
+  X <- Gibbs.data$X
   X.star <- Gibbs.data$X.star
   
-  # Gibbs.hist
   sigma.error2.hist <- Gibbs.hist$sigma.error2.hist
-  U.hist <- Gibbs.hist$U.hist
+  U.hist <-Gibbs.hist$U.hist
   U.star.hist <- Gibbs.hist$U.star.hist
   
-  # GP.param
   theta <- GP.param$theta
   rho <- GP.param$rho
   
-  # Gibbs.other
-  d <- Gibbs.other$d
   single.ustar <- if(!is.null(Gibbs.other$single.ustar)) Gibbs.other$single.ustar else FALSE
   separate <- if(!is.null(Gibbs.other$separate)) Gibbs.other$separate else FALSE
-  req.n.mc <- Gibbs.other$n.mc  # Requested MCMC samples
+  seed <- if(!is.null(Gibbs.other$seed)) Gibbs.other$seed else 222
   
-  if (!is.null(Gibbs.other$seed)) {
-    set.seed(Gibbs.other$seed)
+  if (!is.null(seed)) {
+    set.seed(seed)
   }
   
-  # 2. Compute Constants ----
-  n <- nrow(X)
-  n.star <- nrow(X.star)
+  # Constants ----
+  n.mc <- length(sigma.error2.hist)  # number of repeated samples to draw
+  n.star <- nrow(X.star)  # number of new samples
   
-  # Determine bounds based on available history
-  total.iter <- length(sigma.error2.hist)
-  n.mc <- min(req.n.mc, total.iter)
-  iter.indices <- (total.iter - n.mc + 1):total.iter
-  
-  # Allocate Empty Matrices
+  # Empty matrices ----
   f.predict.hist <- matrix(0, nrow = n.star, ncol = n.mc)
   y.predict.hist <- matrix(0, nrow = n.star, ncol = n.mc)
-  
-  # 3. Kriging Prediction Loop ----
+  #browser()
+  # Sampler ----
   for (idx in 1:n.mc) {
-    
-    k <- iter.indices[idx]
-    
-    # Draw latent components from the k-th iteration of history
-    sigma.error2 <- sigma.error2.hist[k]  
-    U <- U.hist[, ((k-1)*d+1):(k*d), drop = FALSE]
-    
+    # Extract ----
+    sigma.error2 <- sigma.error2.hist[idx]
+    U <- U.hist[, ((idx-1)*d+1):(idx*d), drop = FALSE]
     if (single.ustar) {
-      U.star <- U.star.hist  # Fixed U.star across all iterations
+      U.star <- U.star.hist
     } else {
-      U.star <- U.star.hist[, ((idx-1)*d+1):(idx*d), drop = FALSE] # Notice: U.star is aligned with idx, not k, assuming U.star.hist was generated for n.mc samples
+      #print(((idx-1)*d+1):(idx*d))
+      #browser()
+      U.star <- U.star.hist[, ((idx-1)*d+1):(idx*d), drop = FALSE]
     }
     
-    # Construct Joint Kernel Matrices (Equation 31)
-    Theta <- c(theta, rho^2 * sigma.error2)
+    # Draw y.star ----
+    Theta <- c(theta, rho^2*sigma.error2)
     W <- cbind(X, U)
     W.star <- cbind(X.star, U.star)
-    
     KWW <- KernelMatrix(W = W, Theta = Theta)
-    C <- KWW + sigma.error2 * diag(n)
+    C <- KWW + sigma.error2*diag(n)
     Ci <- solve(C)
     KstarW <- KernelMatrix(W = W.star, Theta = Theta, V = W)
     
-    # Conditional GP Draw (Kriging step)
     if (separate) {
-      sdv <- sqrt(rho^2 * sigma.error2 - apply(KstarW, 1, function(x) t(x) %*% Ci %*% x))
-      f.predict.hist[, idx] <- KstarW %*% Ci %*% y + rnorm(n.star) * sdv
+      sdv <-  sqrt(rho^2*sigma.error2 - apply(KstarW, 1, function(x) t(x)%*%Ci%*%x))
+      f.predict.hist[, idx] <- KstarW%*%Ci%*%y + rnorm(n.star)*sdv
     } else {
       Kstar <- KernelMatrix(W = W.star, Theta = Theta)
-      var.star <- Kstar - KstarW %*% Ci %*% t(KstarW)
-      var.star <- as.symmetric.matrix(var.star)  # Enforce symmetry in case of floating point issues
-      f.predict.hist[, idx] <- rmvnorm(1, KstarW %*% Ci %*% y, var.star)  
+      var.star <- Kstar - KstarW%*%Ci%*%t(KstarW)
+      var.star <- as.symmetric.matrix(var.star)  #in case of numerical error
+      f.predict.hist[, idx] <- rmvnorm(1, KstarW%*%Ci%*%y, var.star)  # kriging
     }
-    
-    # Add noise for observed y.star
     y.predict.hist[, idx] <- f.predict.hist[, idx] + rnorm(n.star, 0, sqrt(sigma.error2))
   }
   
-  # 4. Return ----
+  # Return ----
   return(list(f.predict.hist = f.predict.hist,
               y.predict.hist = y.predict.hist))
 }
 
 ```
+
+
