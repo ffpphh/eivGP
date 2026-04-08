@@ -226,7 +226,7 @@ get.initial.nominal <- function(Gibbs.data) {
 
 ###Predict Oracle
 ```{r}
-#' Unified Oracle Predictor Function
+#' Oracle prediction using the data-generating process.
 #' 
 #' @param input.type String. "ordinal" or "nominal".
 #' @param Gibbs.data List containing data inputs (e.g., X, c, X.star, c.star, code, limits).
@@ -254,9 +254,11 @@ predict.oracle <- function(input.type, Gibbs.data, Gibbs.param, Gibbs.other) {
     return(predict.oracle.nominal(Gibbs.data, Gibbs.param, Gibbs.other))
   }
 }
+```
 
 
 #' Oracle Predictor for Ordinal Models
+```{r}
 predict.oracle.ordinal <- function(Gibbs.data, Gibbs.param, Gibbs.other) {
   
   # 1. Unpack Inputs
@@ -277,6 +279,7 @@ predict.oracle.ordinal <- function(Gibbs.data, Gibbs.param, Gibbs.other) {
   # Gibbs.other
   uniform <- if(!is.null(Gibbs.other$uniform)) Gibbs.other$uniform else FALSE
   n.mc <- if(!is.null(Gibbs.other$n.mc)) Gibbs.other$n.mc else 10000
+  seed <- if(! is.null(Gibbs.other$seed)) Gibbs.other$seed else 999
   
   # 2. Compute Constants and Initialize
   n.star <- length(c.star)
@@ -310,9 +313,12 @@ predict.oracle.ordinal <- function(Gibbs.data, Gibbs.param, Gibbs.other) {
               y.predict.hist = y.predict.hist, 
               f.predict.hist = f.predict.hist))
 }
+```
+
 
 
 #' Oracle Predictor for Nominal Models
+```{r}
 predict.oracle.nominal <- function(Gibbs.data, Gibbs.param, Gibbs.other) {
   
   # 1. Unpack Inputs
@@ -330,14 +336,13 @@ predict.oracle.nominal <- function(Gibbs.data, Gibbs.param, Gibbs.other) {
   # Gibbs.other
   f <- Gibbs.other$f # True classifier function
   uniform <- if(!is.null(Gibbs.other$uniform)) Gibbs.other$uniform else FALSE
-  n.mc <- if(!is.null(Gibbs.other$n.mc)) Gibbs.other$n.mc else 1000
+  n.mc <- Gibbs.other$n.mc
   
   # 2. Compute Constants and Initialize
   n <- length(c.vec)
   d <- ncol(Sigma.u)
   cnt <- matrix(0, n, n.mc)
   U.hist <- matrix(0, n, d*n.mc)
-  
   X.tilde <- cbind(1, X)
   mean.u <- X.tilde %*% B.tilde
   Chol.u <- t(chol(Sigma.u))
@@ -351,16 +356,11 @@ predict.oracle.nominal <- function(Gibbs.data, Gibbs.param, Gibbs.other) {
       while (TRUE) {
         cntt <- cntt + 1
         if (!uniform) {
-          # Gaussian DGP design
           U.prime <- c(mean.u[i, ] + Chol.u %*% rnorm(d))
         } else {
-          # Uniform design independent of x
           U.prime <- runif(d, u.lb, u.ub)
         }
-        
-        # Determine category based on true classifier f
         c.prime <- f(U.prime[1], U.prime[2])$c
-        
         if (c.prime == c.vec[i]) {
           U[i, ] <- U.prime
           break
